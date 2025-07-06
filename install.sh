@@ -1,125 +1,113 @@
 #!/bin/bash
-
-# install.sh – Full setup: Docker Ollama + Open WebUI + Nginx SSL (custom domain, https)
-# Jalankan dengan: bash install.sh
-
 set -e
 
-echo "==========================================="
-echo "   INSTALASI OLLAMA + OPEN WEBUI + SSL"
-echo "==========================================="
-read -rp "Masukkan domain untuk akses (contoh: gaharai.fun): " DOMAIN
+# === [ Auto Installer: Docker + Ollama + Open WebUI + SSL + Custom Domain (IPv4 ping only) ] ===
 
-if [[ -z "$DOMAIN" ]]; then
-    echo "ERROR: Domain tidak boleh kosong!"
-    exit 1
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Jalankan script ini sebagai root (sudo)."
+  exit 1
 fi
 
-EMAIL="admin@$DOMAIN"
-PROJECT_DIR="$HOME/ollama-webui"
-WEBUI_PORT=3000
+echo "Update package index & install prerequisite..."
+apt-get update -y
+apt-get install -y ca-certificates curl gnupg lsb-release software-properties-common dnsutils iputils-ping
 
-echo
-echo "Domain yang digunakan: $DOMAIN"
-echo "Email untuk SSL: $EMAIL"
-echo "Pastikan domain sudah diarahkan ke IP server ini (A record DNS sudah benar)!"
-echo "Tekan ENTER untuk melanjutkan, CTRL+C untuk batalkan..."
-read
+# Remove old docker if any
+apt-get remove -y docker docker-engine docker.io containerd runc docker-compose docker-compose-v2 podman-docker || true
 
-echo "==== [1/7] Update & install dependencies ===="
-sudo apt update
-sudo apt install -y apt-transport-https ca-certificates curl software-properties-common
+echo "Tambah Docker official repository..."
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
 
-echo "==== [2/7] Install Docker & Compose ===="
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
-  https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-sudo apt update
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" | \
+  tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-echo "==== [3/7] Add user ke grup docker ===="
-sudo usermod -aG docker $USER
-echo "===> Jika baru pertama kali install Docker, logout/login ulang agar akses Docker tanpa sudo."
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-echo "==== [4/7] Deploy Docker Compose Ollama + Open WebUI ===="
-mkdir -p "$PROJECT_DIR"
-cd "$PROJECT_DIR"
+echo "Cek Docker version..."
+docker --version
+docker compose version
 
-cat << EOF > docker-compose.yml
-version: '3.8'
-services:
-  ollama:
-    image: ollama/ollama
-    container_name: ollama
-    ports:
-      - "0.0.0.0:11434:11434"
-    volumes:
-      - ollama-data:/root/.ollama
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-    restart: always
+echo "Menjalankan container Ollama..."
+docker run -d --name ollama --restart always -v ollama:/root/.ollama -p 11434:11434 ollama/ollama
 
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: open-webui
-    depends_on:
-      - ollama
-    ports:
-      - "0.0.0.0:${WEBUI_PORT}:8080"
-    environment:
-      - OLLAMA_API_BASE_URL=http://ollama:11434
-      - WEBUI_HOST=0.0.0.0
-    restart: always
+echo "Menjalankan container Open WebUI..."
+docker run -d --name open-webui --restart always -p 3000:8080 -v ollama:/root/.ollama -v open-webui:/app/backend/data ghcr.io/open-webui/open-webui:ollama
 
-volumes:
-  ollama-data:
-EOF
+echo ""
+echo "=== Input domain untuk Open WebUI ==="
+read -p "Masukkan nama domain (mis: example.com): " DOMAIN
+if [[ -z "$DOMAIN" ]]; then
+  echo "Domain tidak boleh kosong. Exiting."
+  exit 1
+fi
 
-docker compose up -d
+# Regex: valid untuk domain .com .fun .id dll
+if ! [[ "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]; then
+  echo "Format domain tidak valid. Pastikan domain benar (mis: example.com)."
+  exit 1
+fi
 
-echo "==== [5/7] Install Nginx & Certbot ===="
-sudo apt install -y nginx certbot python3-certbot-nginx
+SERVER_IPV4=$(curl -4 -s ifconfig.me)
 
-echo "==== [6/7] Konfigurasi Nginx reverse proxy ===="
-sudo tee /etc/nginx/sites-available/$DOMAIN > /dev/null <<EOF
+echo "Cek ping IPv4 ke $DOMAIN ..."
+PING_IPV4=$(ping -c 1 -4 "$DOMAIN" | grep "bytes from" | head -n1 | awk -F'[()]' '{print $2}' | awk '{print $1}')
+
+if [[ -z "$PING_IPV4" ]]; then
+  echo "Ping ke $DOMAIN gagal. Pastikan domain aktif dan dapat diping."
+  exit 1
+fi
+
+if [[ "$PING_IPV4" != "$SERVER_IPV4" ]]; then
+  echo "Domain $DOMAIN belum mengarah ke IP server ($SERVER_IPV4)."
+  echo "Arahkan dulu A record $DOMAIN ke $SERVER_IPV4, lalu jalankan ulang script ini."
+  exit 1
+fi
+
+echo "Ping IPv4 cocok: $PING_IPV4"
+echo "Domain $DOMAIN sudah terhubung ke server."
+
+echo "Install nginx & certbot (Let's Encrypt SSL)..."
+apt-get install -y nginx certbot python3-certbot-nginx
+
+echo "Konfigurasi Nginx reverse proxy..."
+cat > /etc/nginx/sites-available/$DOMAIN <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
 
     location / {
-        proxy_pass http://localhost:${WEBUI_PORT};
+        proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        # Websocket support
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
     }
 }
 EOF
 
-sudo ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
-sudo nginx -t && sudo systemctl reload nginx
+ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
 
-echo "==== [7/7] Request & Pasang SSL (Let's Encrypt) ===="
-sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m $EMAIL
+nginx -t || { echo "Nginx configuration error!"; exit 1; }
+systemctl reload nginx
 
-echo
-echo "==============================================="
-echo "Semua proses selesai!"
-echo
-echo "Open WebUI Ollama siap diakses di: https://$DOMAIN"
-echo
-echo "Catatan:"
-echo "- Jika install Docker pertama kali, logout-login dulu agar bisa pakai Docker tanpa sudo."
-echo "- Jika port 80/443 error saat SSL, cek firewall/cloud provider."
-echo "- Untuk cek status Docker: cd \$HOME/ollama-webui && docker compose ps"
-echo "- Untuk log error: docker compose logs"
-echo "- Untuk stop service: docker compose down"
-echo
-echo "SSL dari Let's Encrypt otomatis diperpanjang oleh certbot."
-echo "==============================================="
+echo "Proses request SSL via Let's Encrypt..."
+certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --redirect -m "admin@$DOMAIN" || { echo "Certbot gagal!"; exit 1; }
+
+echo "Aktifkan dan konfigurasi UFW (firewall)..."
+ufw allow OpenSSH
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw allow 3000/tcp
+ufw allow 11434/tcp
+ufw --force enable
+
+echo ""
+echo "==== SELESAI ===="
+echo "Open WebUI siap diakses di: https://$DOMAIN"
+echo "Ollama API port: 11434"
