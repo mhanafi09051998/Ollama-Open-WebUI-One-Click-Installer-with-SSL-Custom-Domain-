@@ -1,30 +1,39 @@
-# 🚀 Ollama + WebUI Installer with Auto SSL & CLI Integration
+# 🚀 Ollama + Open WebUI One Click Installer [with SSL & Custom Domain] 🚀
 
-Skrip `install.sh` ini akan mengatur seluruh ekosistem AI Ollama kamu hanya dalam satu perintah!  
-Cocok untuk VPS atau server Linux Ubuntu. Tersedia GUI Web dan kontrol penuh lewat SSH/CLI. 😎
+![banner](https://user-images.githubusercontent.com/12424215/288237098-c5e6f8a6-1fd8-4efc-aea3-b5e295c3e7e7.png)
 
----
-
-## 🔧 Fitur Utama
-
-✅ Instalasi otomatis **Ollama CLI**  
-✅ Jalankan **WebUI di Docker** dengan dukungan model lokal  
-✅ Otomatis **SSL HTTPS** dengan Let's Encrypt  
-✅ **CLI auto-pull model**: `ollama run` langsung unduh model jika belum ada  
-✅ Bisa **install model dari SSH**, dan langsung muncul di WebUI  
-✅ Support **reverse proxy** Nginx
+> **Instalasi AI Lokal Ter-CEPAT & Ter-Mudah!**  
+> Satu script, deploy Ollama + Open WebUI dalam Docker, reverse proxy Nginx, dan SSL Let's Encrypt siap pakai—cukup 1x klik, langsung online di domain kamu!
 
 ---
 
-## 🧠 Persyaratan
+## ✨ Fitur Utama
 
-- VPS dengan OS Ubuntu 20.04/22.04
-- Akses root (`sudo`)
-- Domain aktif & sudah mengarah ke IP VPS (A Record)
+- ⚡ **Instalasi Otomatis:** Semua dependensi (Docker, Compose, Nginx, Certbot, dsb.) auto install!
+- 🌍 **Custom Domain Support:** Langsung minta nama domain sendiri, siap HTTPS.
+- 🔒 **SSL Let's Encrypt:** Gratis, otomatis, renew otomatis—langsung aman!
+- 💬 **Open WebUI Modern:** Tampilan bersih, powerful, dan mudah diakses siap digunakan siapa saja.
+- 🐳 **Dockerized:** Gampang deploy, gampang update, mudah backup, tanpa ribet setup manual.
+- 🧠 **CPU Ready:** Tidak butuh GPU, langsung jalan di VPS/cloud manapun.
+- 🚀 **Proven untuk Pemula & Pro!**
 
 ---
 
-## 🚀 Cara Instalasi
+## 📸 Demo Screenshot
+
+<img src="https://raw.githubusercontent.com/open-webui/open-webui/main/docs/screenshot.png" alt="Open WebUI Screenshot" width="700"/>
+
+---
+
+## 🛠️ Cara Instalasi
+
+### 1. **Siapkan VPS/Server**
+- OS **Ubuntu 22.04/24.04** (direkomendasikan)
+- Punya **akses root/sudo**
+- Domain aktif (A Record sudah diarahkan ke IP VPS Anda)
+
+### 2. **Jalankan Script Installer**
 
 ```bash
-sudo bash install.sh
+wget https://raw.githubusercontent.com/your-repo/ollama-openwebui-nginx-ssl/main/install.sh
+bash install.sh
