@@ -1,130 +1,191 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# ===================================================================================
+# Skrip Instalasi Otomatis untuk Ollama, Open WebUI, dan Nginx dengan SSL
+# ===================================================================================
+#
+# Deskripsi:
+# Skrip ini akan menginstal dan mengonfigurasi komponen berikut:
+# 1. Docker & Docker Compose - Untuk menjalankan Open WebUI dalam container.
+# 2. Nginx - Sebagai reverse proxy dengan SSL (HTTPS) dari Let's Encrypt.
+# 3. Certbot - Untuk mengelola sertifikat SSL secara otomatis.
+# 4. Ollama - LLM runner yang berjalan sebagai service di host.
+# 5. Open WebUI - Antarmuka web untuk Ollama.
+#
+# Prasyarat:
+# - Server baru dengan sistem operasi Debian/Ubuntu.
+# - Akses root atau pengguna dengan hak sudo.
+# - DNS A Record untuk domain Anda HARUS sudah mengarah ke IP server ini.
+#
+# ===================================================================================
+
+# --- Konfigurasi ---
+# Domain yang akan digunakan untuk mengakses Open WebUI.
+# PASTIKAN DNS A Record untuk domain ini sudah menunjuk ke IP server Anda.
+DOMAIN="gaharaiv2.com"
+
+# Email untuk pendaftaran Let's Encrypt (penting untuk notifikasi pemulihan/perpanjangan).
+ADMIN_EMAIL="admin@example.com" # <-- GANTI DENGAN EMAIL ANDA YANG VALID
+
+# Port internal yang akan digunakan oleh container Open WebUI.
+# Sebaiknya tidak diubah kecuali ada konflik port di server Anda.
+WEBUI_HOST_PORT="8080"
+
+# --- Akhir Konfigurasi ---
+
+
+# Hentikan skrip jika terjadi error
 set -e
 
-# ====== 🔍 Logging semua output ke file ======
-exec > >(tee -i /var/log/ollama-install.log)
-exec 2>&1
+echo "============================================================"
+echo "Memulai Instalasi Ollama & Open WebUI untuk domain: $DOMAIN"
+echo "Dengan konfigurasi SSL (Let's Encrypt)."
+echo "============================================================"
+echo ""
 
-echo "🚀 Installer Ollama + Open WebUI + SSL + CLI-GUI Sinkron oleh Gahar Inovasi Teknologi"
+# --- Langkah 1: Update Sistem dan Instal Dependensi Dasar ---
+echo "--> Langkah 1: Memperbarui sistem dan menginstal dependensi..."
+sudo apt-get update
+sudo apt-get install -y curl wget gnupg apt-transport-https ca-certificates software-properties-common
 
-# 1. Input domain
-read -rp "🌐 Masukkan domain Anda (contoh: gaharai.fun): " DOMAIN
+echo "Dependensi dasar berhasil diinstal."
+echo ""
 
-# 2. Install dependensi
-echo "📦 Menginstall Docker, Certbot, dan Nginx..."
-apt update
-apt install -y curl apt-transport-https ca-certificates gnupg software-properties-common lsb-release
-apt install -y nginx certbot python3-certbot-nginx ufw
 
-# 3. Firewall setup (UFW)
-echo "🛡️ Mengatur firewall..."
-ufw allow OpenSSH
-ufw allow 80
-ufw allow 443
-ufw --force enable
-
-# 4. Install Docker jika belum ada
-if ! command -v docker &> /dev/null; then
-  echo "🐳 Menginstall Docker..."
-  curl -fsSL https://get.docker.com | sh
-fi
-
-# 5. Pastikan Docker aktif
-echo "▶️ Memastikan Docker aktif..."
-systemctl start docker
-systemctl enable docker
-
-# 6. Deteksi GPU
-USE_CPU="false"
-if ! command -v nvidia-smi &> /dev/null; then
-  echo "⚠️ GPU tidak terdeteksi. Menggunakan mode CPU."
-  USE_CPU="true"
+# --- Langkah 2: Instal Docker Engine ---
+echo "--> Langkah 2: Menginstal Docker Engine..."
+if ! command -v docker &> /dev/null
+then
+    echo "Docker tidak ditemukan. Memulai instalasi..."
+    sudo install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    sudo chmod a+r /etc/apt/keyrings/docker.gpg
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    sudo apt-get update
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    sudo systemctl start docker
+    sudo systemctl enable docker
+    echo "Docker berhasil diinstal dan dijalankan."
 else
-  echo "✅ GPU terdeteksi. Menggunakan mode GPU."
+    echo "Docker sudah terinstal. Melewati langkah ini."
 fi
+echo ""
 
-# 7. Jalankan container Ollama (jika belum ada)
-if docker ps -a --format '{{.Names}}' | grep -q "^ollama$"; then
-  echo "♻️ Container 'ollama' sudah ada. Melewati pembuatan ulang."
+
+# --- Langkah 3: Instal Nginx dan Certbot ---
+echo "--> Langkah 3: Menginstal Nginx dan Certbot..."
+if ! command -v nginx &> /dev/null
+then
+    sudo apt-get install -y nginx
+    sudo systemctl start nginx
+    sudo systemctl enable nginx
+    echo "Nginx berhasil diinstal."
 else
-  echo "🧠 Menjalankan container Ollama..."
-  if [ "$USE_CPU" = "true" ]; then
-    docker run -d \
-      --name ollama \
-      --restart always \
-      -v ollama:/root/.ollama \
-      -e OLLAMA_MODE=cpu \
-      -p 11434:11434 \
-      ollama/ollama
-  else
-    docker run -d \
-      --gpus all \
-      --name ollama \
-      --restart always \
-      -v ollama:/root/.ollama \
-      -p 11434:11434 \
-      ollama/ollama
-  fi
+    echo "Nginx sudah terinstal."
 fi
-
-# 8. Jalankan Open WebUI (jika belum ada)
-if docker ps -a --format '{{.Names}}' | grep -q "^open-webui$"; then
-  echo "♻️ Container 'open-webui' sudah ada. Melewati pembuatan ulang."
+if ! command -v certbot &> /dev/null
+then
+    sudo apt-get install -y certbot python3-certbot-nginx
+    echo "Certbot berhasil diinstal."
 else
-  echo "🖥️ Menjalankan Open WebUI..."
-  docker run -d \
-    --name open-webui \
-    --restart always \
-    -p 8080:8080 \
-    -v ollama:/root/.ollama \
-    -v open-webui:/app/backend/data \
-    ghcr.io/open-webui/open-webui:ollama
+    echo "Certbot sudah terinstal."
 fi
+echo ""
 
-# 9. Setup Nginx reverse proxy
-echo "⚙️ Menyiapkan Nginx reverse proxy untuk $DOMAIN..."
-cat > /etc/nginx/sites-available/open-webui <<EOF
+
+# --- Langkah 4: Instal Ollama ---
+echo "--> Langkah 4: Menginstal Ollama..."
+curl -fsSL https://ollama.com/install.sh | sh
+echo "Ollama berhasil diinstal. Service ollama sedang berjalan."
+echo ""
+
+# --- Langkah 4.1: Unduh Model Awal (Contoh: llama3) ---
+echo "--> Langkah 4.1: Mengunduh model awal 'llama3' melalui CLI..."
+# Perintah ini akan mengunduh model dan membuatnya langsung tersedia di WebUI
+sudo ollama pull llama3
+echo "Model 'llama3' berhasil diunduh."
+echo ""
+
+
+# --- Langkah 5: Jalankan Open WebUI menggunakan Docker ---
+echo "--> Langkah 5: Menjalankan Open WebUI melalui Docker..."
+if [ "$(sudo docker ps -q -f name=open-webui)" ]; then
+    echo "Container open-webui yang sudah ada ditemukan. Menghentikan dan menghapusnya..."
+    sudo docker stop open-webui
+    sudo docker rm open-webui
+fi
+sudo docker run -d -p ${WEBUI_HOST_PORT}:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui --restart always ghcr.io/open-webui/open-webui:main
+echo "Container Open WebUI berhasil dijalankan pada port $WEBUI_HOST_PORT."
+echo ""
+
+
+# --- Langkah 6: Konfigurasi Nginx dan Ambil Sertifikat SSL ---
+echo "--> Langkah 6: Mengonfigurasi Nginx dan mendapatkan sertifikat SSL..."
+
+# Buat file konfigurasi Nginx dasar untuk domain
+sudo tee /etc/nginx/sites-available/$DOMAIN > /dev/null <<EOF
 server {
     listen 80;
+    listen [::]:80;
     server_name $DOMAIN;
 
     location / {
-        proxy_pass http://localhost:8080;
+        proxy_pass http://localhost:$WEBUI_HOST_PORT;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 }
 EOF
 
-ln -sf /etc/nginx/sites-available/open-webui /etc/nginx/sites-enabled/open-webui
-rm -f /etc/nginx/sites-enabled/default
-nginx -t && systemctl start nginx && systemctl reload nginx
-
-# 10. Deteksi SSL
-SSL_PATH="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
-if [ -f "$SSL_PATH" ]; then
-  echo "🔒 SSL sudah ada. Melewati Certbot."
-else
-  echo "🔐 Mendapatkan sertifikat SSL Let's Encrypt..."
-  certbot --nginx --non-interactive --agree-tos -m admin@$DOMAIN -d $DOMAIN
+# Aktifkan site
+if [ ! -L /etc/nginx/sites-enabled/$DOMAIN ]; then
+    sudo ln -s /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/
 fi
 
-# 11. Tambahkan auto-renew SSL via cron
-echo "🔁 Menjadwalkan perpanjangan otomatis SSL..."
-echo "0 3 * * * root certbot renew --quiet" > /etc/cron.d/ssl-renew
+# Hapus link konfigurasi default jika ada
+if [ -L /etc/nginx/sites-enabled/default ]; then
+    sudo rm /etc/nginx/sites-enabled/default
+fi
 
-# 12. Jalankan model llama3
-echo "📥 Menarik dan menjalankan model llama3..."
-docker exec ollama ollama pull llama3
-docker exec ollama ollama run llama3
+# Cek apakah sertifikat sudah ada. Jika tidak, minta sertifikat baru.
+if [ ! -f /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]; then
+    echo "Sertifikat SSL untuk $DOMAIN tidak ditemukan. Meminta sertifikat baru..."
+    # Hentikan Nginx sementara untuk certbot standalone atau pastikan port 80 bebas
+    sudo systemctl stop nginx
+    # Minta sertifikat. Certbot akan memodifikasi konfigurasi Nginx secara otomatis.
+    sudo certbot --nginx -d $DOMAIN --non-interactive --agree-tos -m $ADMIN_EMAIL --redirect
+    echo "Sertifikat SSL berhasil dibuat."
+else
+    echo "Sertifikat SSL untuk $DOMAIN sudah ada. Melewati permintaan sertifikat."
+fi
 
-# 13. Tambah banner login SSH
-echo "🎉 Menambahkan banner login SSH..."
-echo "🚀 Selamat datang di server Gahar AI - https://$DOMAIN" > /etc/motd
+# Restart Nginx untuk menerapkan semua perubahan
+echo "Restart Nginx untuk menerapkan konfigurasi akhir..."
+sudo systemctl restart nginx
+echo ""
 
-# DONE!
-echo "✅ Instalasi selesai!"
-echo "🌐 GUI: https://$DOMAIN"
-echo "💡 Jalankan model lain via CLI: docker exec -it ollama ollama run <nama_model>"
+
+# --- Selesai ---
+echo "============================================================"
+echo "🎉 Instalasi Selesai! 🎉"
+echo "============================================================"
+echo ""
+echo "Open WebUI sekarang seharusnya dapat diakses melalui URL aman:"
+echo "URL: https://$DOMAIN"
+echo ""
+echo "Catatan Penting:"
+echo "1. Pengguna pertama yang mendaftar di web UI akan otomatis menjadi admin."
+echo "2. Model 'llama3' sudah terinstal. Anda bisa langsung menggunakannya."
+echo "3. Untuk menambah model lain via SSH, cukup jalankan perintah:"
+echo "   sudo ollama run <nama_model_lain>"
+echo "   Contoh: sudo ollama run mistral"
+echo "   Model tersebut akan otomatis muncul di daftar model pada WebUI."
+echo "4. Perpanjangan SSL akan berjalan otomatis."
+echo ""
