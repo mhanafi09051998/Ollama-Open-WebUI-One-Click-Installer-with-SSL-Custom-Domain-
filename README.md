@@ -1,18 +1,28 @@
-# 🧠 Ollama WebUI Installer
+# 🌐 Ollama Web GUI + CLI Installer 🔧
 
-Script otomatis untuk menginstall **Ollama Web GUI** (dengan Open WebUI) menggunakan **Docker**, serta konfigurasi otomatis **Nginx** dan **Let's Encrypt SSL** untuk domain Anda.
+Skrip *install.sh* ini memudahkan kamu untuk:
+1. 🐋 Menjalankan **Open WebUI (Ollama GUI)** via Docker  
+2. 💻 Menginstal **Ollama CLI** di sistem (tanpa Snap)  
+3. 🔒 Mengatur **SSL otomatis** dengan Let's Encrypt & Nginx  
 
-## 🚀 Fitur
+---
 
-- 🐳 Jalankan Ollama WebUI dengan Docker
-- 🌐 Akses melalui domain sendiri
-- 🔐 SSL otomatis via Let's Encrypt
-- ⚙️ Konfigurasi Nginx otomatis
+## 📦 Fitur Utama
+1. *All-in-One*  
+   • GUI & CLI Ollama terpasang bersamaan  
+   • Model langsung ter-mount ke GUI  
+2. *Keamanan*  
+   • SSL otomatis oleh Let's Encrypt  
+   • Konfigurasi Nginx sebagai reverse-proxy  
+3. *Otomatisasi*  
+   • Update & instalasi dependensi  
+   • Layanan Docker & Nginx aktif otomatis  
+   • Restart container jika crash  
 
-## 📦 Instalasi
+---
 
-```bash
-git clone https://github.com/username/ollama-webui-installer.git
-cd ollama-webui-installer
-chmod +x install.sh
-sudo ./install.sh
+## 🚀 Cara Pakai
+1. Clone repo:
+   ```bash
+   git clone https://github.com/USERNAME/REPO.git
+   cd REPO
