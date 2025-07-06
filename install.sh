@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # install.sh - Instalasi Ollama CLI & Web GUI dengan Docker, plus SSL Let's Encrypt via Nginx
-# Menambahkan wrapper sehingga 'ollama run' otomatis melakukan pull model.
+# Termasuk wrapper 'ollama run' otomatis pull dan dukungan instalasi model via SSH
 # Penggunaan: sudo bash install.sh
 
 set -euo pipefail
@@ -28,10 +28,9 @@ curl -fsSL https://ollama.com/install.sh | sh
 
 # 3. Buat wrapper untuk 'ollama run' -> auto pull
 echo "[*] Membuat wrapper untuk 'ollama run' sehingga auto pull..."
-# Pindahkan binary asli
 ORIG_BIN="$(which ollama)"
 mv "$ORIG_BIN" /usr/local/bin/ollama-real
-# Buat wrapper baru
+
 cat > /usr/local/bin/ollama << 'EOF'
 #!/usr/bin/env bash
 if [ "$1" = "run" ]; then
@@ -42,6 +41,7 @@ else
   exec /usr/local/bin/ollama-real "$@"
 fi
 EOF
+
 chmod +x /usr/local/bin/ollama
 
 # 4. Enable & start Docker & Nginx
@@ -53,11 +53,12 @@ systemctl start docker.service nginx.service
 echo "[*] Menarik dan menjalankan container Open-WebUI..."
 docker pull ${WEBUI_IMAGE}
 docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
+
 docker run -d \
   --name ${CONTAINER_NAME} \
   --restart unless-stopped \
-  -p 127.0.0.1:${HOST_PORT}:${CONTAINER_PORT} \
-  -v /root/.ollama:/root/.ollama \
+  --network host \
+  -v /root/.ollama/models:/root/.ollama/models \
   ${WEBUI_IMAGE}
 
 # 6. Konfigurasi Nginx sebagai reverse proxy
@@ -82,9 +83,13 @@ ln -sf ${NGINX_CONF} /etc/nginx/sites-enabled/
 nginx -t
 systemctl reload nginx
 
-# 7. Dapatkan & pasang SSL Let's Encrypt
-echo "[*] Mengambil sertifikat SSL untuk ${DOMAIN}..."
-certbot --nginx -d ${DOMAIN} --non-interactive --agree-tos --email ${EMAIL}
+# 7. Dapatkan & pasang SSL Let's Encrypt jika belum ada
+if [ -d "/etc/letsencrypt/live/${DOMAIN}" ]; then
+  echo "[✔] Sertifikat SSL untuk ${DOMAIN} sudah ada. Melewati pendaftaran ulang."
+else
+  echo "[*] Mengambil sertifikat SSL untuk ${DOMAIN}..."
+  certbot --nginx -d ${DOMAIN} --non-interactive --agree-tos --email ${EMAIL}
+fi
 
 # 8. Reload Nginx akhir
 systemctl reload nginx
@@ -94,9 +99,10 @@ cat <<EOF
 
 🎉 Instalasi Selesai!
 - Ollama CLI terinstal dengan wrapper auto-pull.
-- Untuk menjalankan model: 'ollama run <model-name>' otomatis akan mengunduh model jika belum ada.
-- Open WebUI + Ollama berjalan di Docker pada localhost:${HOST_PORT}
-- Akses: https://${DOMAIN}/
+- Untuk menginstal model via SSH: jalankan 'ollama run <model-name>'
+  (model otomatis akan tampil di GUI jika berhasil di-pull)
+- Open WebUI berjalan di Docker (host network), mount model ke dalamnya.
+- Akses WebUI di: https://${DOMAIN}/
 - SSL dikelola otomatis oleh Let's Encrypt
 
 EOF
