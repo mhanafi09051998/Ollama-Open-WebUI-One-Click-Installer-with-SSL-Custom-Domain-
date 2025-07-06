@@ -1,113 +1,73 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-# === [ Auto Installer: Docker + Ollama + Open WebUI + SSL + Custom Domain (IPv4 ping only) ] ===
+# If Docker is not already installed, install it along with dependencies:contentReference[oaicite:0]{index=0}:contentReference[oaicite:1]{index=1}.
+if ! command -v docker &> /dev/null; then
+    # Remove old, conflicting Docker packages if present:contentReference[oaicite:2]{index=2}.
+    sudo apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
 
-if [ "$(id -u)" -ne 0 ]; then
-  echo "Jalankan script ini sebagai root (sudo)."
-  exit 1
+    # Install prerequisites for apt over HTTPS (ca-certificates, curl, etc.):contentReference[oaicite:3]{index=3}.
+    sudo apt-get update
+    sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+    # Add Docker’s official GPG key and repository:contentReference[oaicite:4]{index=4}:contentReference[oaicite:5]{index=5}.
+    sudo mkdir -p /etc/apt/keyrings
+    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+      | sudo tee /etc/apt/keyrings/docker.asc > /dev/null
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+      https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+      | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    sudo apt-get update
+
+    # Install Docker Engine (docker-ce) and related components:contentReference[oaicite:6]{index=6}.
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+    # (Optional) Allow running Docker without sudo by adding current user to 'docker' group:contentReference[oaicite:7]{index=7}.
+    sudo usermod -aG docker "$USER"
 fi
 
-echo "Update package index & install prerequisite..."
-apt-get update -y
-apt-get install -y ca-certificates curl gnupg lsb-release software-properties-common dnsutils iputils-ping
-
-# Remove old docker if any
-apt-get remove -y docker docker-engine docker.io containerd runc docker-compose docker-compose-v2 podman-docker || true
-
-echo "Tambah Docker official repository..."
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-chmod a+r /etc/apt/keyrings/docker.gpg
-
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" | \
-  tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-apt-get update -y
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-echo "Cek Docker version..."
-docker --version
-docker compose version
-
-echo "Menjalankan container Ollama..."
-docker run -d --name ollama --restart always -v ollama:/root/.ollama -p 11434:11434 ollama/ollama
-
-echo "Menjalankan container Open WebUI..."
-docker run -d --name open-webui --restart always -p 3000:8080 -v ollama:/root/.ollama -v open-webui:/app/backend/data ghcr.io/open-webui/open-webui:ollama
-
-echo ""
-echo "=== Input domain untuk Open WebUI ==="
-read -p "Masukkan nama domain (mis: example.com): " DOMAIN
-if [[ -z "$DOMAIN" ]]; then
-  echo "Domain tidak boleh kosong. Exiting."
-  exit 1
+# Install Ollama for x86_64 (CPU-only) if not already installed:contentReference[oaicite:8]{index=8}.
+if ! command -v ollama &> /dev/null; then
+    # Download and extract the Ollama Linux package (CPU-only) to /usr.
+    curl -fsSL https://ollama.com/download/ollama-linux-amd64.tgz -o ollama-linux-amd64.tgz
+    sudo tar -C /usr -xzf ollama-linux-amd64.tgz
+    rm ollama-linux-amd64.tgz
 fi
 
-# Regex: valid untuk domain .com .fun .id dll
-if ! [[ "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]; then
-  echo "Format domain tidak valid. Pastikan domain benar (mis: example.com)."
-  exit 1
+# Create a dedicated system user for Ollama (non-login, system account):contentReference[oaicite:9]{index=9}.
+if ! id -u ollama > /dev/null 2>&1; then
+    sudo useradd -r -s /bin/false -m -d /usr/share/ollama ollama
 fi
 
-SERVER_IPV4=$(curl -4 -s ifconfig.me)
+# Create or overwrite the systemd service file for Ollama:contentReference[oaicite:10]{index=10}.
+# This will run 'ollama serve' on startup under the 'ollama' user.
+sudo tee /etc/systemd/system/ollama.service > /dev/null << 'EOF'
+[Unit]
+Description=Ollama Service
+After=network-online.target
 
-echo "Cek ping IPv4 ke $DOMAIN ..."
-PING_IPV4=$(ping -c 1 -4 "$DOMAIN" | grep "bytes from" | head -n1 | awk -F'[()]' '{print $2}' | awk '{print $1}')
+[Service]
+ExecStart=/usr/bin/ollama serve
+User=ollama
+Group=ollama
+Restart=always
+RestartSec=3
+Environment="OLLAMA_HOST=0.0.0.0"
 
-if [[ -z "$PING_IPV4" ]]; then
-  echo "Ping ke $DOMAIN gagal. Pastikan domain aktif dan dapat diping."
-  exit 1
-fi
-
-if [[ "$PING_IPV4" != "$SERVER_IPV4" ]]; then
-  echo "Domain $DOMAIN belum mengarah ke IP server ($SERVER_IPV4)."
-  echo "Arahkan dulu A record $DOMAIN ke $SERVER_IPV4, lalu jalankan ulang script ini."
-  exit 1
-fi
-
-echo "Ping IPv4 cocok: $PING_IPV4"
-echo "Domain $DOMAIN sudah terhubung ke server."
-
-echo "Install nginx & certbot (Let's Encrypt SSL)..."
-apt-get install -y nginx certbot python3-certbot-nginx
-
-echo "Konfigurasi Nginx reverse proxy..."
-cat > /etc/nginx/sites-available/$DOMAIN <<EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
+[Install]
+WantedBy=multi-user.target
 EOF
 
-ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/
-rm -f /etc/nginx/sites-enabled/default
+# Reload systemd, enable Ollama to start on boot, and start the service:contentReference[oaicite:11]{index=11}.
+sudo systemctl daemon-reload
+sudo systemctl enable ollama
+sudo systemctl start ollama
 
-nginx -t || { echo "Nginx configuration error!"; exit 1; }
-systemctl reload nginx
+# Run Open WebUI in a Docker container, exposed on port 3000 in the browser:contentReference[oaicite:12]{index=12}.
+# This will map container port 8080 to host port 3000 and persist data in a Docker volume.
+docker run -d -p 3000:8080 --add-host=host.docker.internal:host-gateway \
+    -v open-webui:/app/backend/data \
+    --name open-webui --restart always ghcr.io/open-webui/open-webui:main
 
-echo "Proses request SSL via Let's Encrypt..."
-certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --redirect -m "admin@$DOMAIN" || { echo "Certbot gagal!"; exit 1; }
-
-echo "Aktifkan dan konfigurasi UFW (firewall)..."
-ufw allow OpenSSH
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw allow 3000/tcp
-ufw allow 11434/tcp
-ufw --force enable
-
-echo ""
-echo "==== SELESAI ===="
-echo "Open WebUI siap diakses di: https://$DOMAIN"
-echo "Ollama API port: 11434"
+echo "Installation complete. Open WebUI is accessible at http://localhost:3000"
