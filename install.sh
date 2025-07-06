@@ -1,84 +1,130 @@
 #!/usr/bin/env bash
+set -e
 
-# install.sh - Instalasi Ollama CLI & Web GUI dengan Docker, plus SSL Let's Encrypt via Nginx
-# Penggunaan: sudo bash install.sh
+# ====== 🔍 Logging semua output ke file ======
+exec > >(tee -i /var/log/ollama-install.log)
+exec 2>&1
 
-set -euo pipefail
+echo "🚀 Installer Ollama + Open WebUI + SSL + CLI-GUI Sinkron oleh Gahar Inovasi Teknologi"
 
-# 0. Input domain & email
-read -rp "🌐 Masukkan domain Anda (misal: gaharinovasiteknologi.com): " DOMAIN
-read -rp "📧 Masukkan email untuk registrasi Let's Encrypt: " EMAIL
+# 1. Input domain
+read -rp "🌐 Masukkan domain Anda (contoh: gaharai.fun): " DOMAIN
 
-# Konstanta
-WEBUI_IMAGE="ghcr.io/open-webui/open-webui:ollama"
-CONTAINER_NAME="open-webui"
-HOST_PORT=3000
-CONTAINER_PORT=8080
-NGINX_CONF="/etc/nginx/sites-available/${DOMAIN}.conf"
+# 2. Install dependensi
+echo "📦 Menginstall Docker, Certbot, dan Nginx..."
+apt update
+apt install -y curl apt-transport-https ca-certificates gnupg software-properties-common lsb-release
+apt install -y nginx certbot python3-certbot-nginx ufw
 
-# 1. Update & install dependensi
-echo "[*] Memperbarui sistem dan menginstal paket dasar..."
-apt-get update && apt-get upgrade -y
-apt-get install -y docker.io nginx certbot python3-certbot-nginx curl
+# 3. Firewall setup (UFW)
+echo "🛡️ Mengatur firewall..."
+ufw allow OpenSSH
+ufw allow 80
+ufw allow 443
+ufw --force enable
 
-# 2. Install Ollama CLI (tanpa Snap)
-echo "[*] Menginstal Ollama CLI..."
-curl -fsSL https://ollama.com/install.sh | sh
+# 4. Install Docker jika belum ada
+if ! command -v docker &> /dev/null; then
+  echo "🐳 Menginstall Docker..."
+  curl -fsSL https://get.docker.com | sh
+fi
 
-# 3. Enable & start Docker & Nginx
-echo "[*] Mengaktifkan layanan Docker & Nginx..."
-systemctl enable docker.service nginx.service
-systemctl start docker.service nginx.service
+# 5. Pastikan Docker aktif
+echo "▶️ Memastikan Docker aktif..."
+systemctl start docker
+systemctl enable docker
 
-# 4. Jalankan Open WebUI (Ollama) di Docker, mount model dari host
-echo "[*] Menarik dan menjalankan container Open-WebUI..."
-docker pull ${WEBUI_IMAGE}
-docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
-docker run -d \
-  --name ${CONTAINER_NAME} \
-  --restart unless-stopped \
-  -p 127.0.0.1:${HOST_PORT}:${CONTAINER_PORT} \
-  -v /root/.ollama:/root/.ollama \
-  ${WEBUI_IMAGE}
+# 6. Deteksi GPU
+USE_CPU="false"
+if ! command -v nvidia-smi &> /dev/null; then
+  echo "⚠️ GPU tidak terdeteksi. Menggunakan mode CPU."
+  USE_CPU="true"
+else
+  echo "✅ GPU terdeteksi. Menggunakan mode GPU."
+fi
 
-# 5. Konfigurasi Nginx sebagai reverse proxy
-echo "[*] Menulis konfigurasi Nginx untuk ${DOMAIN}..."
-cat > ${NGINX_CONF} <<EOF
+# 7. Jalankan container Ollama (jika belum ada)
+if docker ps -a --format '{{.Names}}' | grep -q "^ollama$"; then
+  echo "♻️ Container 'ollama' sudah ada. Melewati pembuatan ulang."
+else
+  echo "🧠 Menjalankan container Ollama..."
+  if [ "$USE_CPU" = "true" ]; then
+    docker run -d \
+      --name ollama \
+      --restart always \
+      -v ollama:/root/.ollama \
+      -e OLLAMA_MODE=cpu \
+      -p 11434:11434 \
+      ollama/ollama
+  else
+    docker run -d \
+      --gpus all \
+      --name ollama \
+      --restart always \
+      -v ollama:/root/.ollama \
+      -p 11434:11434 \
+      ollama/ollama
+  fi
+fi
+
+# 8. Jalankan Open WebUI (jika belum ada)
+if docker ps -a --format '{{.Names}}' | grep -q "^open-webui$"; then
+  echo "♻️ Container 'open-webui' sudah ada. Melewati pembuatan ulang."
+else
+  echo "🖥️ Menjalankan Open WebUI..."
+  docker run -d \
+    --name open-webui \
+    --restart always \
+    -p 8080:8080 \
+    -v ollama:/root/.ollama \
+    -v open-webui:/app/backend/data \
+    ghcr.io/open-webui/open-webui:ollama
+fi
+
+# 9. Setup Nginx reverse proxy
+echo "⚙️ Menyiapkan Nginx reverse proxy untuk $DOMAIN..."
+cat > /etc/nginx/sites-available/open-webui <<EOF
 server {
     listen 80;
-    server_name ${DOMAIN};
+    server_name $DOMAIN;
 
     location / {
-        proxy_pass http://127.0.0.1:${HOST_PORT};
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
+        proxy_pass http://localhost:8080;
         proxy_set_header Host \$host;
-        proxy_cache_bypass \$http_upgrade;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 EOF
 
-ln -sf ${NGINX_CONF} /etc/nginx/sites-enabled/
-nginx -t
-systemctl reload nginx
+ln -sf /etc/nginx/sites-available/open-webui /etc/nginx/sites-enabled/open-webui
+rm -f /etc/nginx/sites-enabled/default
+nginx -t && systemctl start nginx && systemctl reload nginx
 
-# 6. Dapatkan & pasang SSL Let's Encrypt
-echo "[*] Mengambil sertifikat SSL untuk ${DOMAIN}..."
-certbot --nginx -d ${DOMAIN} --non-interactive --agree-tos --email ${EMAIL}
+# 10. Deteksi SSL
+SSL_PATH="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+if [ -f "$SSL_PATH" ]; then
+  echo "🔒 SSL sudah ada. Melewati Certbot."
+else
+  echo "🔐 Mendapatkan sertifikat SSL Let's Encrypt..."
+  certbot --nginx --non-interactive --agree-tos -m admin@$DOMAIN -d $DOMAIN
+fi
 
-# 7. Reload Nginx akhir
-systemctl reload nginx
+# 11. Tambahkan auto-renew SSL via cron
+echo "🔁 Menjadwalkan perpanjangan otomatis SSL..."
+echo "0 3 * * * root certbot renew --quiet" > /etc/cron.d/ssl-renew
 
-# 8. Ringkasan
-cat <<EOF
+# 12. Jalankan model llama3
+echo "📥 Menarik dan menjalankan model llama3..."
+docker exec ollama ollama pull llama3
+docker exec ollama ollama run llama3
 
-🎉 Instalasi Selesai!
-- Ollama CLI terinstal: jalankan 'ollama pull <model>' via SSH.
-- Open WebUI + Ollama berjalan di Docker pada localhost:${HOST_PORT}
-- Akses: https://${DOMAIN}/
-- SSL dikelola otomatis oleh Let's Encrypt
+# 13. Tambah banner login SSH
+echo "🎉 Menambahkan banner login SSH..."
+echo "🚀 Selamat datang di server Gahar AI - https://$DOMAIN" > /etc/motd
 
-EOF
-
-
+# DONE!
+echo "✅ Instalasi selesai!"
+echo "🌐 GUI: https://$DOMAIN"
+echo "💡 Jalankan model lain via CLI: docker exec -it ollama ollama run <nama_model>"
