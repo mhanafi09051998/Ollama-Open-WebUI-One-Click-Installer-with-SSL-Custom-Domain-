@@ -1,31 +1,66 @@
-# 🚀 Ollama + Open WebUI One Click Installer [with SSL & Custom Domain] 🚀
+# Ollama + Open WebUI Auto Installer
 
-> **Instalasi AI Lokal Ter-CEPAT & Ter-Mudah!**  
-> Satu script, deploy Ollama + Open WebUI dalam Docker, reverse proxy Nginx, dan SSL Let's Encrypt siap pakai—cukup 1x klik, langsung online di domain kamu!
-
----
-
-## ✨ Fitur Utama
-
-- ⚡ **Instalasi Otomatis:** Semua dependensi (Docker, Compose, Nginx, Certbot, dsb.) auto install!
-- 🌍 **Custom Domain Support:** Langsung minta nama domain sendiri, siap HTTPS.
-- 🔒 **SSL Let's Encrypt:** Gratis, otomatis, renew otomatis—langsung aman!
-- 💬 **Open WebUI Modern:** Tampilan bersih, powerful, dan mudah diakses siap digunakan siapa saja.
-- 🐳 **Dockerized:** Gampang deploy, gampang update, mudah backup, tanpa ribet setup manual.
-- 🧠 **CPU Ready:** Tidak butuh GPU, langsung jalan di VPS/cloud manapun.
-- 🚀 **Proven untuk Pemula & Pro!**
+A production-ready, automated installer script for deploying [Ollama](https://ollama.com/) and [Open WebUI](https://github.com/open-webui/open-webui) with Docker, SSL (Let's Encrypt), and a custom domain on Ubuntu 24.04 LTS.  
+This script streamlines the setup of an AI inference server complete with a secure reverse proxy and firewall, suitable for production VPS environments.
 
 ---
 
-## 🛠️ Cara Instalasi
+## Features
 
-### 1. **Siapkan VPS/Server**
-- OS **Ubuntu 22.04/24.04** (direkomendasikan)
-- Punya **akses root/sudo**
-- Domain aktif (A Record sudah diarahkan ke IP VPS Anda)
+- **Automated installation** of Docker & Docker Compose
+- **Deploys Ollama & Open WebUI** in Docker containers
+- **Reverse proxy** with Nginx and SSL (Let's Encrypt/Certbot)
+- **Custom domain setup** with domain verification (via IPv4 ping)
+- **Automatic UFW firewall** configuration
+- **Simple and interactive CLI**
 
-### 2. **Jalankan Script Installer**
+---
+
+## Requirements
+
+- Ubuntu 24.04 LTS (fresh server recommended)
+- A root or sudo-enabled user
+- An active domain already pointing (A record) to your server's IPv4 address
+
+---
+
+## Usage
+
+1. **Clone the repository:**
+    ```bash
+    git clone https://github.com/your-username/ollama-openwebui-auto-installer.git
+    cd ollama-openwebui-auto-installer
+    ```
+
+2. **Make the installer executable:**
+    ```bash
+    chmod +x install.sh
+    ```
+
+3. **Run the installer as root (or with sudo):**
+    ```bash
+    sudo ./install.sh
+    ```
+
+4. **Follow the on-screen instructions:**
+   - Enter your custom domain (e.g. `yourdomain.com`) when prompted.
+   - Ensure your domain's A record points to your VPS IPv4 before proceeding.
+
+---
+
+## What Does The Script Do?
+
+- Installs Docker, Docker Compose, Nginx, and Certbot
+- Pulls and runs [Ollama](https://ollama.com/) and [Open WebUI](https://github.com/open-webui/open-webui) via Docker containers
+- Prompts for your domain, then verifies it via IPv4 ping
+- Configures Nginx as a secure reverse proxy with SSL
+- Opens necessary firewall ports (80, 443, 3000, 11434, SSH)
+
+---
+
+## Add Models to Ollama
+
+After installation, you can add models using:
 
 ```bash
-wget https://raw.githubusercontent.com/mhanafi09051998/Ollama-Open-WebUI-One-Click-Installer-with-SSL-Custom-Domain-/main/install.sh
-bash install.sh
+docker exec -it ollama ollama pull llama3
