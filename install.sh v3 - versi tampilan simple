@@ -1,0 +1,162 @@
+#!/bin/bash
+
+# Pastikan skrip dijalankan dengan hak akses root
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Skrip ini harus dijalankan sebagai root atau dengan sudo." >&2
+  exit 1
+fi
+
+# --- Konfigurasi Tampilan dan Log ---
+LOG_FILE="/var/log/ollama_install.log"
+# Hapus log lama untuk sesi baru
+> "$LOG_FILE"
+
+# Warna untuk output status
+GREEN=$(tput setaf 2)
+RED=$(tput setaf 1)
+NC=$(tput sgr0) # No Color
+
+# Fungsi untuk menjalankan langkah dan menampilkan status
+# $1: Perintah yang akan dijalankan
+# $2: Pesan deskripsi untuk langkah tersebut
+run_step() {
+    local cmd=$1
+    local msg=$2
+    
+    # Cetak pesan dan status awal
+    echo -n "=> $msg"
+    
+    # Jalankan perintah dan alihkan semua output ke file log
+    # 2>&1 mengalihkan stderr ke stdout, yang kemudian dialihkan ke log
+    if eval "$cmd" >> "$LOG_FILE" 2>&1; then
+        # Jika berhasil, cetak status OK
+        echo -e "\r=> $msg ... ${GREEN}[  OK  ]${NC}"
+    else
+        # Jika gagal, cetak status GAGAL dan keluar
+        echo -e "\r=> $msg ... ${RED}[ GAGAL ]${NC}"
+        echo "Error terdeteksi. Silakan periksa log untuk detail: $LOG_FILE"
+        exit 1
+    fi
+}
+
+# --- 0. Input dari Pengguna ---
+echo "===================================================="
+echo "=> Meminta informasi yang diperlukan..."
+echo "===================================================="
+
+read -p "   Masukkan nama domain Anda (contoh: my-ollama.example.com): " DOMAIN_NAME
+if [ -z "$DOMAIN_NAME" ]; then
+    echo "   Nama domain tidak boleh kosong. Instalasi dibatalkan."
+    exit 1
+fi
+
+read -p "   Masukkan alamat email Anda (untuk notifikasi SSL): " EMAIL
+if [ -z "$EMAIL" ]; then
+    echo "   Alamat email tidak boleh kosong. Instalasi dibatalkan."
+    exit 1
+fi
+
+echo "=> Instalasi akan dilanjutkan untuk domain: $DOMAIN_NAME"
+sleep 2
+
+# --- 1. Persiapan Sistem & Validasi DNS ---
+run_step "apt-get update -y" "Memperbarui daftar paket sistem"
+run_step "apt-get install -y curl gnupg ca-certificates dnsutils" "Menginstal dependensi dasar (curl, gnupg, dnsutils)"
+
+# Validasi DNS tetap ditampilkan secara interaktif karena penting
+echo "=> Memvalidasi DNS untuk domain $DOMAIN_NAME (menggunakan IPv4)..."
+SERVER_IP=$(curl -4 -s https://ifconfig.me/ip || curl -4 -s https://api.ipify.org)
+if [ -z "$SERVER_IP" ]; then
+    echo "   ${RED}GAGAL: Tidak dapat menentukan IP publik IPv4 server.${NC}"
+    exit 1
+fi
+echo "   IP Publik Server ini adalah: $SERVER_IP"
+
+DOMAIN_IP=$(dig +short "$DOMAIN_NAME" A | head -n 1)
+if [ -z "$DOMAIN_IP" ]; then
+    echo "   ${RED}GAGAL: Tidak dapat menemukan A record (IPv4) untuk domain '$DOMAIN_NAME'.${NC}"
+    exit 1
+fi
+echo "   Domain '$DOMAIN_NAME' mengarah ke IP: $DOMAIN_IP"
+
+if [ "$SERVER_IP" != "$DOMAIN_IP" ]; then
+    echo "   ${RED}GAGAL: IP tidak cocok! Harap perbarui A record DNS Anda.${NC}"
+    exit 1
+else
+    echo "   ${GREEN}Validasi DNS berhasil!${NC}"
+fi
+sleep 2
+
+# --- 2. Instalasi Docker ---
+run_step "for pkg in docker.io docker-doc docker-compose docker-ce docker-ce-cli containerd.io runc; do apt-get remove -y \$pkg; done" "Menghapus instalasi Docker lama (jika ada)"
+run_step "install -m 0755 -d /etc/apt/keyrings" "Membuat direktori untuk kunci GPG Docker"
+run_step "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg" "Menambahkan kunci GPG resmi Docker"
+run_step "chmod a+r /etc/apt/keyrings/docker.gpg" "Menyesuaikan izin kunci GPG"
+run_step 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null' "Menambahkan repositori Docker"
+run_step "apt-get update -y" "Memperbarui daftar paket setelah menambah repo Docker"
+run_step "apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin" "Menginstal Docker Engine dan komponennya"
+run_step "docker run hello-world" "Memverifikasi instalasi Docker"
+
+# --- 3. Instalasi Ollama ---
+run_step "curl -fsSL https://ollama.com/install.sh | sh" "Mengunduh dan menginstal Ollama"
+run_step "command -v ollama" "Memverifikasi path instalasi Ollama"
+run_step 'mkdir -p /etc/systemd/system/ollama.service.d/ && echo -e "[Service]\nEnvironment=\"OLLAMA_HOST=0.0.0.0\"" > /etc/systemd/system/ollama.service.d/override.conf' "Mengkonfigurasi Ollama untuk diakses Docker"
+run_step "systemctl daemon-reload && systemctl restart ollama" "Memuat ulang dan merestart layanan Ollama"
+run_step "ollama pull deepseek-r1:1.5b" "Mengunduh model deepseek-r1:1.5b"
+run_step "ollama list | grep -q 'deepseek-r1:1.5b'" "Memverifikasi model telah diunduh"
+
+# --- 4. Instalasi & Konfigurasi Nginx ---
+run_step "apt-get install -y nginx" "Menginstal Nginx"
+NGINX_CONF="server {
+    listen 80;
+    server_name $DOMAIN_NAME;
+    location / {
+        proxy_pass http://localhost:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \\\"upgrade\\\";
+    }
+}"
+run_step "echo \"$NGINX_CONF\" > /etc/nginx/sites-available/$DOMAIN_NAME" "Membuat file konfigurasi Nginx untuk domain"
+run_step "ln -sf /etc/nginx/sites-available/$DOMAIN_NAME /etc/nginx/sites-enabled/ && rm -f /etc/nginx/sites-enabled/default" "Mengaktifkan site Nginx"
+run_step "nginx -t" "Menguji konfigurasi Nginx"
+run_step "systemctl restart nginx" "Merestart Nginx"
+
+# --- 5. Konfigurasi Firewall (UFW) ---
+run_step "ufw --force enable" "Mengaktifkan firewall (UFW)"
+run_step "ufw allow 'OpenSSH'" "Mengizinkan koneksi SSH"
+run_step "ufw allow 'Nginx Full'" "Mengizinkan traffic web (HTTP & HTTPS)"
+run_step "ufw reload" "Memuat ulang aturan firewall"
+
+# --- 6. Jalankan Open WebUI ---
+run_step "docker rm -f open-webui" "Menghapus kontainer Open WebUI lama (jika ada)"
+run_step "docker run -d -p 127.0.0.1:8080:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui --restart always ghcr.io/open-webui/open-webui:main" "Menjalankan kontainer Open WebUI"
+run_step "sleep 5 && docker ps -a | grep -q 'open-webui'" "Memverifikasi kontainer Open WebUI berjalan"
+
+# --- 7. Instalasi SSL ---
+run_step "apt-get install -y certbot python3-certbot-nginx" "Menginstal Certbot untuk Nginx"
+run_step "certbot --nginx -d \"$DOMAIN_NAME\" --non-interactive --agree-tos -m \"$EMAIL\" --redirect" "Memperoleh dan menginstal sertifikat SSL"
+run_step "systemctl list-timers | grep -q 'certbot.timer'" "Memverifikasi pembaruan SSL otomatis"
+
+# --- Selesai ---
+echo
+echo "===================================================="
+echo "=> ${GREEN}INSTALASI SELESAI!${NC}"
+echo "===================================================="
+echo
+echo "   Selamat! Open WebUI Anda sekarang dapat diakses melalui:"
+echo "   https://$DOMAIN_NAME"
+echo
+if [ -n "$SUDO_USER" ]; then
+    usermod -aG docker "$SUDO_USER"
+    echo "   Penting: Pengguna '$SUDO_USER' telah ditambahkan ke grup Docker."
+    echo "   Harap logout dan login kembali agar dapat menjalankan perintah 'docker' tanpa sudo."
+fi
+echo
+echo "   Log instalasi lengkap tersimpan di: $LOG_FILE"
+echo
