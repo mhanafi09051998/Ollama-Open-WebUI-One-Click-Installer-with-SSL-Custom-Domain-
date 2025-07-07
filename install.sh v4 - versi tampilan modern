@@ -34,14 +34,14 @@ print_banner() {
     clear
     echo "${BLUE}"
     echo "╔══════════════════════════════════════════════════════════════════════════════╗"
-    echo "║                                                                              ║"
-    echo "║     ██████╗ ██╗      ██████╗ ██╗      █████╗ ████████╗ █████╗  Ollama        ║"
-    echo "║     ██╔══██╗██║     ██╔═══██╗██║     ██╔══██╗╚══██╔══╝██╔══██╗   Auto        ║"
-    echo "║     ██████╔╝██║     ██║   ██║██║     ███████║   ██║   ███████║ Installer     ║"
-    echo "║     ██╔═══╝ ██║     ██║   ██║██║     ██╔══██║   ██║   ██╔══██║               ║"
-    echo "║     ██║     ███████╗╚██████╔╝███████╗██║  ██║   ██║   ██║  ██║ by Gahar      ║"
-    echo "║     ╚═╝     ╚══════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝               ║"
-    echo "║                                                                              ║"
+    echo "║                                                                        ║"
+    echo "║     ██████╗ ██╗      ██████╗ ██╗      █████╗ ████████╗ █████╗  Ollama      ║"
+    echo "║     ██╔══██╗██║     ██╔═══██╗██║     ██╔══██╗╚══██╔══╝██╔══██╗   Auto       ║"
+    echo "║     ██████╔╝██║     ██║   ██║██║     ███████║   ██║   ███████║ Installer    ║"
+    echo "║     ██╔═══╝ ██║     ██║   ██║██║     ██╔══██║   ██║   ██╔══██║              ║"
+    echo "║     ██║     ███████╗╚██████╔╝███████╗██║  ██║   ██║   ██║  ██║ by Gahar     ║"
+    echo "║     ╚═╝     ╚══════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝             ║"
+    echo "║                                                                        ║"
     echo "╚══════════════════════════════════════════════════════════════════════════════╝"
     echo "${NC}"
 }
@@ -54,6 +54,34 @@ print_step_header() {
     echo "${YELLOW}║ [${STEP}/${TOTAL_STEPS}] $1${NC}"
     echo "${YELLOW}╚══════════════════════════════════════════════════════════════════════════════╝${NC}"
 }
+
+# Fungsi untuk menunggu kunci apt dilepaskan
+wait_for_apt_lock() {
+    local msg="Menunggu kunci manajer paket (apt) dilepaskan"
+    echo -n "  ${msg}..."
+    
+    local spinner_pid
+    (
+        while true; do
+            for (( i=0; i<${#SPINNER_CHARS}; i++ )); do
+                echo -ne "\r  ${msg}... [${BLUE}${SPINNER_CHARS:$i:1}${NC}]"
+                sleep 0.1
+            done
+        done
+    ) & spinner_pid=$!
+
+    # Tunggu hingga semua file kunci dilepaskan
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+          fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
+          fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+        sleep 1
+    done
+
+    kill $spinner_pid
+    wait $spinner_pid 2>/dev/null
+    echo -e "\r  ${msg}... [${GREEN}${CHECK}${NC}]  "
+}
+
 
 # Fungsi untuk menjalankan perintah dengan spinner
 run_step() {
@@ -109,6 +137,7 @@ fi
 
 # --- 1. Persiapan & Validasi DNS ---
 print_step_header "Persiapan Sistem & Validasi DNS"
+wait_for_apt_lock # <-- INI ADALAH PERBAIKANNYA
 run_step "apt-get update -y" "Memperbarui daftar paket sistem"
 run_step "apt-get install -y curl gnupg ca-certificates dnsutils" "Menginstal dependensi dasar"
 
