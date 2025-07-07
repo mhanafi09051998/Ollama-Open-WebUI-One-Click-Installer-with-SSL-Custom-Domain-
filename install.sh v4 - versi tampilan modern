@@ -173,14 +173,42 @@ print_step_header "Instalasi Ollama & Model"
 run_step "curl -fsSL https://ollama.com/install.sh | sh" "Mengunduh dan menginstal Ollama"
 run_step 'mkdir -p /etc/systemd/system/ollama.service.d/ && echo -e "[Service]\nEnvironment=\"OLLAMA_HOST=0.0.0.0\"" > /etc/systemd/system/ollama.service.d/override.conf' "Mengkonfigurasi host Ollama"
 run_step "systemctl daemon-reload && systemctl restart ollama" "Merestart layanan Ollama"
+run_step "while ! curl -s http://127.0.0.1:11434/ > /dev/null; do sleep 1; done" "Menunggu server Ollama siap"
 run_step "ollama pull deepseek-r1:1.5b" "Mengunduh model deepseek-r1:1.5b"
 run_step "ollama list | grep -q 'deepseek-r1:1.5b'" "Memverifikasi unduhan model"
 
 # --- 4. Instalasi & Konfigurasi Nginx ---
 print_step_header "Instalasi & Konfigurasi Nginx"
 run_step "apt-get install -y nginx" "Menginstal Nginx"
-NGINX_CONF="server { listen 80; server_name $DOMAIN_NAME; location / { proxy_pass http://localhost:8080; proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto \$scheme; proxy_buffering off; proxy_http_version 1.1; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection \\\"upgrade\\\"; } }"
-run_step "echo \"$NGINX_CONF\" > /etc/nginx/sites-available/$DOMAIN_NAME" "Membuat file konfigurasi Nginx"
+
+# Menulis file konfigurasi Nginx secara langsung untuk menghindari masalah kutipan
+echo -n "  Membuat file konfigurasi Nginx..."
+cat << EOF > "/etc/nginx/sites-available/$DOMAIN_NAME"
+server {
+    listen 80;
+    server_name $DOMAIN_NAME;
+
+    location / {
+        proxy_pass http://localhost:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+    }
+}
+EOF
+
+if [ $? -eq 0 ]; then
+    echo -e "\r  Membuat file konfigurasi Nginx... [${GREEN}${CHECK}${NC}]  "
+else
+    echo -e "\r  Membuat file konfigurasi Nginx... [${RED}${CROSS}${NC}]  "
+    exit 1
+fi
+
 run_step "ln -sf /etc/nginx/sites-available/$DOMAIN_NAME /etc/nginx/sites-enabled/ && rm -f /etc/nginx/sites-enabled/default" "Mengaktifkan site Nginx"
 run_step "nginx -t" "Menguji konfigurasi Nginx"
 run_step "systemctl restart nginx" "Merestart Nginx"
