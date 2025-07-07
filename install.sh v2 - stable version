@@ -1,177 +1,459 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/bash
 
-check_installed() {
-    command -v "$1" &>/dev/null
+# Fungsi untuk menampilkan pesan status
+log_message() {
+    echo "----------------------------------------------------"
+    echo "$1"
+    echo "----------------------------------------------------"
 }
 
-# Firewall UFW: allow only SSH, HTTP, HTTPS
-if check_installed ufw; then
-    echo "[✓] UFW sudah terpasang."
-else
-    echo "[*] Installing UFW (firewall)..."
-    sudo apt-get update
-    sudo apt-get install -y ufw
-fi
-sudo ufw allow 22
-sudo ufw allow 80
-sudo ufw allow 443
-sudo ufw --force enable
-
-# Install Docker jika belum ada
-if ! check_installed docker; then
-    echo "[*] Installing Docker..."
-    sudo apt-get remove -y docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc || true
-    sudo apt-get update
-    sudo apt-get install -y ca-certificates curl gnupg lsb-release
-    sudo mkdir -p /etc/apt/keyrings
-    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo tee /etc/apt/keyrings/docker.asc > /dev/null
-    sudo chmod a+r /etc/apt/keyrings/docker.asc
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-      $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-    sudo apt-get update
-    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    sudo usermod -aG docker "$USER"
-else
-    echo "[✓] Docker sudah terpasang."
-fi
-
-# Install Ollama jika belum ada
-if ! check_installed ollama; then
-    echo "[*] Installing Ollama..."
-    curl -fsSL https://ollama.com/download/ollama-linux-amd64.tgz -o ollama-linux-amd64.tgz
-    sudo tar -C /usr -xzf ollama-linux-amd64.tgz
-    rm ollama-linux-amd64.tgz
-else
-    echo "[✓] Ollama sudah terpasang."
-fi
-
-# Install Nginx jika belum ada
-if ! check_installed nginx; then
-    echo "[*] Installing Nginx..."
-    sudo apt-get update
-    sudo apt-get install -y nginx
-else
-    echo "[✓] Nginx sudah terpasang."
-fi
-
-# Install certbot jika belum ada
-if ! check_installed certbot; then
-    echo "[*] Installing Certbot..."
-    sudo apt-get update
-    sudo apt-get install -y certbot python3-certbot-nginx
-else
-    echo "[✓] Certbot sudah terpasang."
-fi
-
-# Tambah user system & systemd untuk Ollama
-if ! id -u ollama > /dev/null 2>&1; then
-    sudo useradd -r -s /bin/false -m -d /usr/share/ollama ollama
-fi
-
-OLLAMA_SERVICE="/etc/systemd/system/ollama.service"
-if [ ! -f "$OLLAMA_SERVICE" ]; then
-sudo tee "$OLLAMA_SERVICE" > /dev/null << 'EOF'
-[Unit]
-Description=Ollama Service
-After=network-online.target
-
-[Service]
-ExecStart=/usr/bin/ollama serve
-User=ollama
-Group=ollama
-Restart=always
-RestartSec=3
-Environment="OLLAMA_HOST=0.0.0.0"
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    sudo systemctl daemon-reload
-    sudo systemctl enable ollama
-    sudo systemctl start ollama
-else
-    echo "[✓] Service Ollama sudah dikonfigurasi."
-fi
-
-# Input domain & validasi
-while true; do
-    read -rp "Masukkan domain untuk akses WebUI (misal: chat.mydomain.com): " DOMAIN
-    if [[ -z "$DOMAIN" ]]; then
-        echo "Domain tidak boleh kosong!"
-        continue
+# Fungsi untuk mendapatkan IP publik server ini
+get_public_ip() {
+    # Coba beberapa layanan untuk mendapatkan IP publik
+    # Menggunakan curl untuk api.ipify.org karena umumnya ringan dan cepat
+    PUBLIC_IP=$(curl -s api.ipify.org)
+    if [ -z "$PUBLIC_IP" ]; then
+        # Fallback jika api.ipify.org gagal
+        PUBLIC_IP=$(wget -qO- icanhazip.com)
     fi
-    SERVER_IP=$(curl -s https://ipv4.icanhazip.com | tr -d '\n')
-    DOMAIN_IP=$(getent ahostsv4 "$DOMAIN" | awk '{print $1; exit}')
-    if [[ "$DOMAIN_IP" == "$SERVER_IP" ]]; then
-        echo "[✓] Domain valid dan mengarah ke IP server ini: $SERVER_IP"
-        break
+    echo "$PUBLIC_IP"
+}
+
+# Fungsi untuk membersihkan instalasi sebelumnya
+cleanup_previous_installation() {
+    log_message "Memulai proses pembersihan instalasi sebelumnya..."
+
+    # Hentikan dan hapus kontainer Open WebUI
+    if sudo docker ps -a | grep -q "open-webui"; then
+        log_message "Menghentikan dan menghapus kontainer Open WebUI..."
+        sudo docker stop open-webui && sudo docker rm open-webui
+    fi
+
+    # Hapus volume Open WebUI
+    if sudo docker volume ls | grep -q "open-webui"; then
+        log_message "Menghapus volume Docker Open WebUI..."
+        sudo docker volume rm open-webui
+    fi
+
+    # Copot instalasi Ollama
+    if command -v ollama &> /dev/null; then
+        log_message "Mencopot instalasi Ollama..."
+        sudo ollama uninstall
+        # Hapus direktori Ollama jika masih ada
+        sudo rm -rf /usr/local/bin/ollama
+        sudo rm -rf /usr/share/ollama
+    fi
+
+    # Hapus file override systemd untuk Ollama
+    if [ -f "/etc/systemd/system/ollama.service.d/override.conf" ]; then
+        log_message "Menghapus file override Ollama systemd..."
+        sudo rm /etc/systemd/system/ollama.service.d/override.conf
+        sudo systemctl daemon-reload
+    fi
+
+    # Hapus sertifikat Let's Encrypt untuk domain yang dimasukkan (jika ada)
+    # Catatan: Ini akan dijalankan setelah domain diminta
+    if [ -n "$CUSTOM_DOMAIN" ]; then # $CUSTOM_DOMAIN mungkin belum diatur di sini jika cleanup dipanggil terlalu awal
+        if sudo certbot certificates | grep -q "$CUSTOM_DOMAIN"; then
+            log_message "Menghapus sertifikat Let's Encrypt untuk $CUSTOM_DOMAIN..."
+            sudo certbot delete --cert-name "$CUSTOM_DOMAIN"
+        fi
     else
-        echo "[!] Domain $DOMAIN mengarah ke $DOMAIN_IP, bukan ke IP server ($SERVER_IP)"
-        echo "Silakan arahkan DNS domain ke IP server, lalu ulangi."
-        continue
+        log_message "Lewati penghapusan sertifikat Let's Encrypt karena domain belum ditentukan."
     fi
-done
 
-# Konfigurasi Nginx reverse proxy untuk Open WebUI
-NGINX_CONF="/etc/nginx/sites-available/openwebui"
-if [ ! -f "$NGINX_CONF" ]; then
-sudo tee "$NGINX_CONF" > /dev/null << EOF
+
+    # Hapus konfigurasi Nginx untuk Open WebUI
+    NGINX_CONF_FILE="/etc/nginx/sites-available/openwebui.conf"
+    if [ -f "$NGINX_CONF_FILE" ]; then
+        log_message "Menghapus konfigurasi Nginx untuk Open WebUI..."
+        sudo rm -f /etc/nginx/sites-enabled/openwebui.conf
+        sudo rm -f "$NGINX_CONF_FILE"
+        sudo systemctl restart nginx 2>/dev/null || true # Restart Nginx, abaikan error jika Nginx belum terinstal
+    fi
+
+    # Copot instalasi Nginx
+    if command -v nginx &> /dev/null; then
+        log_message "Mencopot instalasi Nginx..."
+        sudo apt-get purge -y nginx nginx-common nginx-full
+        sudo apt-get autoremove -y
+    fi
+
+    # Reset UFW
+    if command -v ufw &> /dev/null; then
+        log_message "Mereset UFW ke pengaturan default..."
+        echo "y" | sudo ufw reset
+        sudo ufw disable # Pastikan dinonaktifkan setelah reset
+    fi
+
+    # Copot instalasi Certbot
+    if command -v certbot &> /dev/null; then
+        log_message "Mencopot instalasi Certbot..."
+        sudo apt-get purge -y certbot python3-certbot-nginx
+        sudo apt-get autoremove -y
+    fi
+
+    # Copot instalasi Docker
+    if command -v docker &> /dev/null; then
+        log_message "Mencopot instalasi Docker..."
+        sudo apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        sudo rm -rf /var/lib/docker
+        sudo rm -rf /var/lib/containerd
+        sudo apt-get autoremove -y
+    fi
+
+    # Copot instalasi dnsutils
+    if command -v dig &> /dev/null; then
+        log_message "Mencopot instalasi dnsutils..."
+        sudo apt-get purge -y dnsutils
+        sudo apt-get autoremove -y
+    fi
+
+    log_message "Pembersihan instalasi sebelumnya selesai."
+    log_message "Disarankan untuk me-restart server setelah pembersihan menyeluruh jika ada masalah yang muncul."
+}
+
+# --- Mulai Skrip ---
+log_message "Skrip Instalasi Open WebUI, Ollama, Docker, Nginx, UFW, dan Let's Encrypt SSL"
+
+read -p "Apakah Anda ingin membersihkan instalasi sebelumnya sebelum melanjutkan? (y/N): " CLEANUP_CONFIRM
+if [[ "$CLEANUP_CONFIRM" =~ ^[Yy]$ ]]; then
+    # Jika pengguna memilih cleanup, minta domain terlebih dahulu agar bisa menghapus sertifikat
+    read -p "Masukkan domain yang ingin Anda gunakan (atau yang sudah ada sertifikatnya) untuk pembersihan: " CUSTOM_DOMAIN_FOR_CLEANUP
+    if [ -n "$CUSTOM_DOMAIN_FOR_CLEANUP" ]; then
+        CUSTOM_DOMAIN="$CUSTOM_DOMAIN_FOR_CLEANUP" # Set CUSTOM_DOMAIN agar cleanup_previous_installation bisa menghapus cert
+    fi
+    cleanup_previous_installation
+    log_message "Melanjutkan dengan instalasi baru setelah pembersihan."
+else
+    log_message "Melewatkan pembersihan instalasi sebelumnya. Melanjutkan dengan instalasi baru."
+fi
+
+# --- 1. Instalasi Ollama ---
+log_message "Memulai instalasi Ollama..."
+
+# Unduh dan instal Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Verifikasi instalasi Ollama
+if command -v ollama &> /dev/null; then
+    log_message "Ollama berhasil diinstal."
+else
+    log_message "Ollama gagal diinstal. Harap periksa log di atas."
+    exit 1
+fi
+
+# --- 2. Instalasi Docker ---
+log_message "Memulai instalasi Docker..."
+
+# Hapus versi Docker lama jika ada (ini juga akan dilakukan oleh cleanup, tapi jaga-jaga)
+for pkg in docker.io docker-doc docker-compose docker-ce docker-ce-cli containerd.io runc; do sudo apt-get remove $pkg; done
+
+# Perbarui indeks paket apt dan instal paket yang diperlukan
+sudo apt-get update
+sudo apt-get install ca-certificates curl gnupg -y
+
+# Tambahkan kunci GPG resmi Docker
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Tambahkan repositori Docker ke sumber APT
+echo \
+  "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Perbarui indeks paket apt lagi
+sudo apt-get update
+
+# Instal Docker Engine, containerd, dan Docker Compose
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+
+# Tambahkan pengguna saat ini ke grup docker (agar tidak perlu sudo untuk menjalankan perintah docker)
+sudo usermod -aG docker "$USER"
+
+# Verifikasi instalasi Docker
+if sudo docker run hello-world &> /dev/null; then
+    log_message "Docker berhasil diinstal dan berfungsi."
+else
+    log_message "Docker gagal diinstal atau tidak berfungsi. Harap periksa log di atas."
+    exit 1
+fi
+
+log_message "Harap logout dan login kembali atau restart terminal Anda agar perubahan grup Docker berlaku."
+
+# --- 3. Instalasi Open WebUI ---
+log_message "Memulai instalasi Open WebUI..."
+
+# Jalankan Open WebUI menggunakan Docker
+# Pastikan port 8080 tersedia
+sudo docker run -d -p 8080:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui --restart always ghcr.io/open-webui/open-webui:main
+
+# Verifikasi instalasi Open WebUI (dengan memeriksa kontainer Docker)
+if sudo docker ps -a | grep -q "open-webui"; then
+    log_message "Open WebUI berhasil diinstal dan sedang berjalan di Docker."
+    log_message "Anda dapat mengakses Open WebUI di browser Anda melalui: http://localhost:8080"
+else
+    log_message "Open WebUI gagal diinstal. Harap periksa log di atas."
+    exit 1
+fi
+
+# --- 4. Pemecahan Masalah (Opsional, jika ada masalah komunikasi Docker-Ollama) ---
+log_message "Mengkonfigurasi Ollama untuk komunikasi dengan Docker (pemecahan masalah opsional)..."
+
+# Buat direktori systemd override jika belum ada
+sudo mkdir -p /etc/systemd/system/ollama.service.d/
+
+# Buat file override untuk layanan Ollama
+# Ini akan menambahkan variabel lingkungan OLLAMA_HOST untuk memungkinkan komunikasi dari Docker
+sudo bash -c 'cat << EOF > /etc/systemd/system/ollama.service.d/override.conf
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0"
+EOF'
+
+# Muat ulang konfigurasi systemd
+sudo systemctl daemon-reload
+
+# Restart layanan Ollama
+sudo systemctl restart ollama
+
+log_message "Konfigurasi Ollama untuk komunikasi Docker telah diterapkan dan layanan Ollama di-restart."
+
+# --- 5. Konfigurasi Domain Kustom untuk Open WebUI dengan Nginx dan Validasi DNS ---
+log_message "Memulai konfigurasi domain kustom untuk Open WebUI."
+
+# Gunakan CUSTOM_DOMAIN yang sudah diatur dari cleanup atau minta lagi
+if [ -z "$CUSTOM_DOMAIN" ]; then
+    read -p "Masukkan domain yang ingin Anda gunakan untuk Open WebUI (misalnya, webui.domainanda.com): " CUSTOM_DOMAIN
+fi
+
+
+if [ -z "$CUSTOM_DOMAIN" ]; then
+    log_message "Domain tidak dimasukkan. Open WebUI akan tetap dapat diakses melalui http://localhost:8080."
+else
+    log_message "Domain yang Anda masukkan: $CUSTOM_DOMAIN"
+
+    # Instal dnsutils untuk 'dig' jika belum ada
+    if ! command -v dig &> /dev/null; then
+        log_message "Paket 'dnsutils' (untuk perintah 'dig') tidak ditemukan. Menginstal..."
+        sudo apt update
+        sudo apt install dnsutils -y
+        if [ $? -ne 0 ]; then
+            log_message "Gagal menginstal 'dnsutils'. Harap periksa koneksi internet Anda."
+            exit 1
+        fi
+        log_message "'dnsutils' berhasil diinstal."
+    fi
+
+    # Dapatkan IP publik server ini
+    SERVER_PUBLIC_IP=$(get_public_ip)
+    if [ -z "$SERVER_PUBLIC_IP" ]; then
+        log_message "PERINGATAN: Tidak dapat menentukan IP publik server ini. Validasi domain mungkin kurang akurat."
+        log_message "Pastikan server Anda memiliki koneksi internet yang berfungsi."
+    else
+        log_message "IP Publik Server ini: $SERVER_PUBLIC_IP"
+    fi
+
+    # Lakukan resolusi DNS untuk domain yang dimasukkan
+    log_message "Memeriksa resolusi DNS untuk domain $CUSTOM_DOMAIN..."
+    RESOLVED_IP=$(dig +short "$CUSTOM_DOMAIN" A | head -n 1)
+
+    if [ -z "$RESOLVED_IP" ]; then
+        log_message "ERROR: Domain '$CUSTOM_DOMAIN' TIDAK BERHASIL RESOLVE ke alamat IP manapun."
+        log_message "Ini berarti DNS Anda belum dikonfigurasi dengan benar atau belum tersebar."
+        log_message "Mohon periksa Catatan A DNS Anda untuk '$CUSTOM_DOMAIN' dan pastikan mengarah ke IP publik server ini ($SERVER_PUBLIC_IP)."
+        log_message "Tanpa resolusi DNS yang benar, instalasi SSL Certbot akan GAGAL."
+        read -p "Apakah Anda ingin melanjutkan tanpa resolusi DNS yang benar? (y/N): " CONFIRM_CONTINUE_DNS
+        if [[ ! "$CONFIRM_CONTINUE_DNS" =~ ^[Yy]$ ]]; then
+            log_message "Membatalkan. Silakan perbaiki Catatan A DNS Anda untuk '$CUSTOM_DOMAIN' dan jalankan skrip lagi."
+            exit 1
+        fi
+    elif [ "$SERVER_PUBLIC_IP" != "$RESOLVED_IP" ]; then
+        log_message "PERINGATAN: Domain '$CUSTOM_DOMAIN' berhasil resolve ke IP '$RESOLVED_IP',"
+        log_message "tetapi IP ini TIDAK COCOK dengan IP publik server ini ($SERVER_PUBLIC_IP)."
+        log_message "Ini kemungkinan berarti DNS Anda belum sepenuhnya diperbarui atau mengarah ke server yang salah."
+        log_message "Instalasi SSL Certbot mungkin GAGAL jika domain tidak mengarah dengan benar ke server ini."
+        read -p "Apakah Anda ingin melanjutkan meskipun ada ketidakcocokan IP? (y/N): " CONFIRM_CONTINUE_IP
+        if [[ ! "$CONFIRM_CONTINUE_IP" =~ ^[Yy]$ ]]; then
+            log_message "Membatalkan. Silakan perbaiki Catatan A DNS Anda untuk '$CUSTOM_DOMAIN' agar mengarah ke '$SERVER_PUBLIC_IP' dan jalankan skrip lagi."
+            exit 1
+        fi
+    else
+        log_message "SUKSES: Domain '$CUSTOM_DOMAIN' resolve ke IP '$RESOLVED_IP', yang cocok dengan IP publik server ini."
+    fi
+
+    # Instal Nginx jika belum terinstal
+    if ! command -v nginx &> /dev/null; then
+        log_message "Nginx tidak ditemukan. Menginstal Nginx..."
+        sudo apt update
+        sudo apt install nginx -y
+        if [ $? -ne 0 ]; then
+            log_message "Gagal menginstal Nginx. Harap periksa koneksi internet atau repositori Anda."
+            exit 1
+        fi
+        log_message "Nginx berhasil diinstal."
+    else
+        log_message "Nginx sudah terinstal. Melanjutkan konfigurasi."
+    fi
+
+    # Buat file konfigurasi Nginx baru (untuk HTTP awal agar Certbot bisa memvalidasi, atau langsung HTTPS jika cert sudah ada)
+    NGINX_CONF_FILE="/etc/nginx/sites-available/openwebui.conf"
+    log_message "Membuat file konfigurasi Nginx: $NGINX_CONF_FILE"
+
+    # Hapus symlink lama jika ada
+    sudo rm -f /etc/nginx/sites-enabled/openwebui.conf
+
+    # --- 6. Konfigurasi UFW (Uncomplicated Firewall) ---
+    log_message "Memulai konfigurasi UFW (Uncomplicated Firewall)..."
+
+    # Instal UFW jika belum terinstal
+    if ! command -v ufw &> /dev/null; then
+        log_message "UFW tidak ditemukan. Menginstal UFW..."
+        sudo apt update
+        sudo apt install ufw -y
+        if [ $? -ne 0 ]; then
+            log_message "Gagal menginstal UFW. Harap periksa koneksi internet Anda."
+            exit 1
+        fi
+        log_message "UFW berhasil diinstal."
+    else
+        log_message "UFW sudah terinstal. Melanjutkan konfigurasi."
+    fi
+
+    # Pastikan SSH diizinkan sebelum mengaktifkan firewall untuk mencegah lockout
+    log_message "Menambahkan aturan UFW: Mengizinkan SSH (Port 22)..."
+    sudo ufw allow 22/tcp
+
+    # Izinkan port HTTP (80) untuk Nginx/web (penting untuk validasi Certbot)
+    log_message "Menambahkan aturan UFW: Mengizinkan HTTP (Port 80)..."
+    sudo ufw allow 80/tcp
+
+    # Izinkan port HTTPS (443) untuk Nginx/web (untuk SSL)
+    log_message "Menambahkan aturan UFW: Mengizinkan HTTPS (Port 443)..."
+    sudo ufw allow 443/tcp
+
+    # Izinkan port 8080 untuk Open WebUI (akses internal)
+    log_message "Menambahkan aturan UFW: Mengizinkan Open WebUI (Port 8080)..."
+    sudo ufw allow 8080/tcp
+
+    # Aktifkan UFW jika belum aktif
+    if ! sudo ufw status | grep -q "Status: active"; then
+        log_message "Mengaktifkan UFW. Anda mungkin akan diminta untuk mengkonfirmasi."
+        echo "y" | sudo ufw enable
+        if [ $? -eq 0 ]; then
+            log_message "UFW berhasil diaktifkan dengan aturan yang diperlukan."
+            log_message "Status UFW saat ini:"
+            sudo ufw status verbose
+        else
+            log_message "Gagal mengaktifkan UFW. Harap periksa log di atas."
+            exit 1
+        fi
+    else
+        log_message "UFW sudah aktif. Aturan telah ditambahkan."
+        log_message "Status UFW saat ini:"
+        sudo ufw status verbose
+    fi
+
+
+    # --- 7. Instalasi dan Konfigurasi Let's Encrypt SSL dengan Certbot ---
+    log_message "Memulai instalasi dan konfigurasi SSL dengan Let's Encrypt (Certbot)..."
+
+    # Instal Certbot dan plugin Nginx-nya
+    sudo apt update
+    sudo apt install certbot python3-certbot-nginx -y
+
+    # Periksa apakah sertifikat untuk domain sudah ada
+    if sudo certbot certificates | grep -q "Cert Name: $CUSTOM_DOMAIN"; then
+        log_message "Sertifikat SSL untuk $CUSTOM_DOMAIN sudah ada. Melompati pendaftaran baru."
+        # Buat konfigurasi Nginx HTTPS jika sertifikat sudah ada
+        sudo bash -c "cat << EOF > $NGINX_CONF_FILE
 server {
     listen 80;
-    server_name $DOMAIN;
+    listen 443 ssl;
+    server_name $CUSTOM_DOMAIN;
+
+    ssl_certificate /etc/letsencrypt/live/$CUSTOM_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$CUSTOM_DOMAIN/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
     location / {
-        proxy_pass http://localhost:3000;
+        proxy_pass http://localhost:8080;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        client_max_body_size 100M;
     }
 }
-EOF
-    sudo ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/openwebui
-    sudo nginx -t && sudo systemctl reload nginx
-else
-    echo "[✓] Konfigurasi Nginx Open WebUI sudah ada."
-fi
+EOF"
+    else
+        log_message "Sertifikat SSL untuk $CUSTOM_DOMAIN belum ada. Mendaftarkan yang baru."
+        # Buat konfigurasi Nginx HTTP awal agar Certbot bisa memvalidasi
+        sudo bash -c "cat << EOF > $NGINX_CONF_FILE
+server {
+    listen 80;
+    server_name $CUSTOM_DOMAIN;
 
-# Setup SSL Certbot (Let's Encrypt)
-if [ ! -d "/etc/letsencrypt/live/$DOMAIN" ]; then
-    echo "[*] Mendapatkan sertifikat SSL dari Let's Encrypt untuk $DOMAIN ..."
-    sudo certbot --nginx --non-interactive --agree-tos --redirect --hsts --staple-ocsp -m admin@$DOMAIN -d $DOMAIN
-else
-    echo "[✓] Sertifikat SSL sudah ada untuk $DOMAIN."
-fi
+    location / {
+        proxy_pass http://localhost:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF"
+        # Aktifkan konfigurasi Nginx awal
+        sudo ln -s $NGINX_CONF_FILE /etc/nginx/sites-enabled/
+        sudo systemctl restart nginx # Restart Nginx untuk memuat konfigurasi HTTP
 
-# Cek status certbot timer (auto renew SSL)
-echo
-echo "==== Certbot Renew Status ===="
-if systemctl is-active --quiet certbot.timer; then
-    echo "[✓] Certbot renewal aktif."
-else
-    echo "[!] WARNING: certbot.timer tidak aktif. Cek dengan 'sudo systemctl status certbot.timer' dan aktifkan agar SSL auto-renew."
-fi
+        log_message "Menjalankan Certbot untuk mendapatkan sertifikat SSL untuk $CUSTOM_DOMAIN."
+        log_message "Ikuti petunjuk Certbot. Anda akan diminta untuk email dan persetujuan ToS."
+        # Penting: Ganti 'admin@"$CUSTOM_DOMAIN"' dengan alamat email Anda yang sebenarnya!
+        sudo certbot --nginx -d "$CUSTOM_DOMAIN" --agree-tos --redirect --hsts --staple-ocsp --email admin@"$CUSTOM_DOMAIN"
 
-# Auto update Docker image dan jalankan Open WebUI
-if docker ps --format '{{.Names}}' | grep -q '^open-webui$'; then
-    echo "[*] Menghentikan dan menghapus container lama Open WebUI..."
-    docker stop open-webui
-    docker rm open-webui
-fi
-echo "[*] Menarik (pull) Docker image terbaru Open WebUI..."
-docker pull ghcr.io/open-webui/open-webui:main
-echo "[*] Menjalankan ulang container Open WebUI..."
-docker run -d -p 3000:8080 --add-host=host.docker.internal:host-gateway \
-  -v open-webui:/app/backend/data \
-  --name open-webui --restart always ghcr.io/open-webui/open-webui:main
+        if [ $? -ne 0 ]; then
+            log_message "Gagal mendapatkan atau menginstal sertifikat SSL untuk $CUSTOM_DOMAIN."
+            log_message "Alasan paling umum adalah domain Anda TIDAK mengarah ke IP publik server ini."
+            log_message "Anda masih dapat mengakses Open WebUI melalui http://localhost:8080."
+            # Hapus konfigurasi Nginx jika Certbot gagal agar tidak ada file sampah
+            sudo rm -f /etc/nginx/sites-enabled/openwebui.conf
+            sudo rm -f "$NGINX_CONF_FILE"
+            sudo systemctl restart nginx 2>/dev/null || true
+            exit 1
+        fi
+    fi
 
-echo
-echo "=== Instalasi & Konfigurasi Selesai ==="
-echo "Akses Open WebUI sekarang di: https://$DOMAIN"
-echo
-echo "[INFO] Firewall hanya membuka port 22 (SSH), 80 (HTTP), dan 443 (HTTPS)."
-echo "[INFO] Docker Open WebUI hanya berjalan di localhost (port 3000, diamankan Nginx + SSL)."
-echo "[INFO] Certbot SSL auto-renew sudah dicek."
+    # Pastikan konfigurasi Nginx yang terbaru (dengan SSL jika baru didaftarkan atau sudah ada) diaktifkan
+    sudo rm -f /etc/nginx/sites-enabled/openwebui.conf # Hapus symlink lama
+    sudo ln -s $NGINX_CONF_FILE /etc/nginx/sites-enabled/ # Buat symlink baru
+    log_message "Menguji konfigurasi Nginx akhir..."
+    sudo nginx -t
+    if [ $? -ne 0 ]; then
+        log_message "Konfigurasi Nginx akhir memiliki kesalahan. Harap periksa file $NGINX_CONF_FILE."
+        exit 1
+    fi
+    log_message "Memuat ulang dan me-restart layanan Nginx..."
+    sudo systemctl restart nginx
+    if [ $? -ne 0 ]; then
+        log_message "Gagal me-restart Nginx setelah konfigurasi SSL. Harap periksa status layanan Nginx."
+        exit 1
+    fi
+
+    log_message "Sertifikat SSL terpasang dan Nginx dikonfigurasi untuk $CUSTOM_DOMAIN."
+    log_message "Anda sekarang dapat mengakses Open WebUI melalui: https://$CUSTOM_DOMAIN"
+
+    # Tes perpanjangan otomatis sertifikat
+    log_message "Menguji perpanjangan otomatis sertifikat Certbot..."
+    sudo certbot renew --dry-run
+    if [ $? -eq 0 ]; then
+        log_message "Perpanjangan otomatis Certbot berhasil diuji."
+    else
+        log_message "Pengujian perpanjangan otomatis Certbot gagal. Periksa log Certbot."
+    fi
+
+fi # End of if [ -z "$CUSTOM_DOMAIN" ]
+
+log_message "Instalasi dan konfigurasi selesai!"
+log_message "Ingat untuk logout dan login kembali agar perubahan grup Docker berlaku."
