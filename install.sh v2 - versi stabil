@@ -1,0 +1,206 @@
+#!/bin/bash
+
+# Fungsi untuk menampilkan pesan status
+log_message() {
+    echo "----------------------------------------------------"
+    echo "$1"
+    echo "----------------------------------------------------"
+}
+
+# --- 0. Konfigurasi Domain Kustom dan Email ---
+log_message "Konfigurasi Domain Kustom dan Email untuk SSL"
+read -p "Masukkan domain yang ingin Anda gunakan untuk Open WebUI (misal: mychat.com): " DESIRED_DOMAIN
+
+if [ -z "$DESIRED_DOMAIN" ]; then
+    log_message "Domain tidak boleh kosong. Menggunakan 'localhost' sebagai fallback dan tidak akan mengkonfigurasi Nginx atau SSL."
+    DESIRED_DOMAIN="localhost"
+    SKIP_NGINX=true
+else
+    SKIP_NGINX=false
+    read -p "Masukkan alamat email Anda untuk notifikasi Let's Encrypt (penting untuk pembaruan sertifikat): " CERTBOT_EMAIL
+    if [ -z "$CERTBOT_EMAIL" ]; then
+        log_message "Email tidak boleh kosong. Instalasi Let's Encrypt mungkin tidak berfungsi dengan baik."
+    fi
+fi
+
+# --- 1. Instalasi Ollama ---
+log_message "Memulai instalasi Ollama..."
+
+# Unduh dan instal Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Verifikasi instalasi Ollama
+if command -v ollama &> /dev/null; then
+    log_message "Ollama berhasil diinstal."
+else
+    log_message "Ollama gagal diinstal. Harap periksa log di atas."
+    exit 1
+fi
+
+# Catatan: Pemilihan dan pengunduhan model (e.g., Llama 3.2 1B)
+# akan dilakukan secara manual setelah instalasi atau melalui Open WebUI.
+# Contoh: ollama run llama3
+
+# --- 2. Instalasi Docker ---
+log_message "Memulai instalasi Docker..."
+
+# Hapus versi Docker lama jika ada
+for pkg in docker.io docker-doc docker-compose docker-ce docker-ce-cli containerd.io runc; do sudo apt-get remove $pkg; done
+
+# Perbarui indeks paket apt dan instal paket yang diperlukan
+sudo apt-get update
+sudo apt-get install ca-certificates curl gnupg -y
+
+# Tambahkan kunci GPG resmi Docker
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Tambahkan repositori Docker ke sumber APT
+echo \
+  "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Perbarui indeks paket apt lagi
+sudo apt-get update
+
+# Instal Docker Engine, containerd, dan Docker Compose
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+
+# Tambahkan pengguna saat ini ke grup docker (agar tidak perlu sudo untuk menjalankan perintah docker)
+sudo usermod -aG docker "$USER"
+
+# Verifikasi instalasi Docker
+if sudo docker run hello-world &> /dev/null; then
+    log_message "Docker berhasil diinstal dan berfungsi."
+else
+    log_message "Docker gagal diinstal atau tidak berfungsi. Harap periksa log di atas."
+    exit 1
+fi
+
+log_message "Harap logout dan login kembali atau restart terminal Anda agar perubahan grup Docker berlaku."
+
+# --- 3. Instalasi Open WebUI ---
+log_message "Memulai instalasi Open WebUI..."
+
+# Jalankan Open WebUI menggunakan Docker
+# Pastikan port 8080 tersedia
+sudo docker run -d -p 8080:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui --restart always ghcr.io/open-webui/open-webui:main
+
+# Verifikasi instalasi Open WebUI (dengan memeriksa kontainer Docker)
+if sudo docker ps -a | grep -q "open-webui"; then
+    log_message "Open WebUI berhasil diinstal dan sedang berjalan di Docker."
+    log_message "Anda dapat mengakses Open WebUI di browser Anda melalui: http://localhost:8080"
+else
+    log_message "Open WebUI gagal diinstal. Harap periksa log di atas."
+    exit 1
+fi
+
+# --- 4. Pemecahan Masalah (Opsional, jika ada masalah komunikasi Docker-Ollama) ---
+log_message "Mengkonfigurasi Ollama untuk komunikasi dengan Docker (pemecahan masalah opsional)..."
+
+# Buat direktori systemd override jika belum ada
+sudo mkdir -p /etc/systemd/system/ollama.service.d/
+
+# Buat file override untuk layanan Ollama
+# Ini akan menambahkan variabel lingkungan OLLAMA_HOST untuk memungkinkan komunikasi dari Docker
+sudo bash -c 'cat << EOF > /etc/systemd/system/ollama.service.d/override.conf
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0"
+EOF'
+
+# Muat ulang konfigurasi systemd
+sudo systemctl daemon-reload
+
+# Restart layanan Ollama
+sudo systemctl restart ollama
+
+log_message "Konfigurasi Ollama untuk komunikasi Docker telah diterapkan dan layanan Ollama di-restart."
+
+# --- 5. Instalasi dan Konfigurasi Nginx Reverse Proxy ---
+if [ "$SKIP_NGINX" = false ]; then
+    log_message "Memulai instalasi dan konfigurasi Nginx Reverse Proxy..."
+
+    # Instal Nginx
+    sudo apt-get install nginx -y
+
+    # Buat file konfigurasi Nginx untuk domain kustom
+    sudo bash -c "cat << EOF > /etc/nginx/sites-available/$DESIRED_DOMAIN
+server {
+    listen 80;
+    listen [::]:80;
+
+    server_name $DESIRED_DOMAIN;
+
+    location / {
+        proxy_pass http://localhost:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
+    }
+}
+EOF"
+
+    # Buat symlink untuk mengaktifkan konfigurasi
+    sudo ln -sf /etc/nginx/sites-available/$DESIRED_DOMAIN /etc/nginx/sites-enabled/
+
+    # Hapus konfigurasi default Nginx
+    if [ -f /etc/nginx/sites-enabled/default ]; then
+        sudo rm /etc/nginx/sites-enabled/default
+    fi
+
+    # Uji konfigurasi Nginx
+    sudo nginx -t
+
+    # Restart Nginx untuk menerapkan perubahan
+    sudo systemctl restart nginx
+
+    if systemctl is-active --quiet nginx; then
+        log_message "Nginx berhasil diinstal dan dikonfigurasi sebagai reverse proxy untuk $DESIRED_DOMAIN."
+        log_message "Anda sekarang dapat mengakses Open WebUI melalui: http://$DESIRED_DOMAIN"
+        log_message "CATATAN PENTING: Pastikan Anda telah mengkonfigurasi catatan DNS A/AAAA domain Anda ($DESIRED_DOMAIN) untuk mengarah ke alamat IP publik server ini."
+
+        # --- 6. Instalasi dan Konfigurasi SSL dengan Let's Encrypt (Baru) ---
+        log_message "Memulai instalasi dan konfigurasi SSL dengan Let's Encrypt..."
+
+        # Instal Certbot dan plugin Nginx-nya
+        sudo apt-get install certbot python3-certbot-nginx -y
+
+        # Konfigurasi UFW (Firewall) jika aktif
+        if command -v ufw &> /dev/null && sudo ufw status | grep -q "Status: active"; then
+            log_message "UFW (Uncomplicated Firewall) terdeteksi aktif. Mengizinkan lalu lintas HTTP dan HTTPS."
+            sudo ufw allow 'Nginx Full'
+            sudo ufw reload
+        else
+            log_message "UFW tidak aktif atau tidak terdeteksi. Pastikan port 80 (HTTP) dan 443 (HTTPS) terbuka di firewall server Anda."
+        fi
+
+        # Dapatkan sertifikat SSL menggunakan Certbot
+        if [ -n "$CERTBOT_EMAIL" ]; then
+            sudo certbot --nginx -d "$DESIRED_DOMAIN" --non-interactive --agree-tos -m "$CERTBOT_EMAIL"
+        else
+            log_message "Email tidak disediakan. Mencoba mendapatkan sertifikat tanpa email (mungkin memerlukan interaksi manual)."
+            sudo certbot --nginx -d "$DESIRED_DOMAIN"
+        fi
+
+        # Verifikasi instalasi SSL
+        if [ -f "/etc/letsencrypt/live/$DESIRED_DOMAIN/fullchain.pem" ]; then
+            log_message "Sertifikat SSL Let's Encrypt berhasil diperoleh dan dikonfigurasi untuk $DESIRED_DOMAIN."
+            log_message "Anda sekarang dapat mengakses Open WebUI dengan aman melalui: https://$DESIRED_DOMAIN"
+        else
+            log_message "Sertifikat SSL Let's Encrypt gagal diperoleh atau dikonfigurasi. Harap periksa log di atas."
+            log_message "Anda masih dapat mencoba mengakses Open WebUI melalui: http://$DESIRED_DOMAIN"
+        fi
+    else
+        log_message "Nginx gagal dikonfigurasi atau tidak berfungsi. Melewatkan instalasi SSL."
+    fi
+else
+    log_message "Melewatkan instalasi Nginx dan SSL karena domain tidak disediakan."
+fi
+
+log_message "Instalasi selesai!"
+log_message "Ingat untuk logout dan login kembali agar perubahan grup Docker berlaku."
+log_message "Pastikan catatan DNS domain Anda ($DESIRED_DOMAIN) mengarah ke alamat IP server ini."
