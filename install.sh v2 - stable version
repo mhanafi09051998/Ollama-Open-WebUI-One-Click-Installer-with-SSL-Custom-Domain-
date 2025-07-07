@@ -7,128 +7,6 @@ log_message() {
     echo "----------------------------------------------------"
 }
 
-# Fungsi untuk mendapatkan IP publik server ini
-get_public_ip() {
-    # Coba beberapa layanan untuk mendapatkan IP publik
-    # Menggunakan curl untuk api.ipify.org karena umumnya ringan dan cepat
-    PUBLIC_IP=$(curl -s api.ipify.org)
-    if [ -z "$PUBLIC_IP" ]; then
-        # Fallback jika api.ipify.org gagal
-        PUBLIC_IP=$(wget -qO- icanhazip.com)
-    fi
-    echo "$PUBLIC_IP"
-}
-
-# Fungsi untuk membersihkan instalasi sebelumnya
-cleanup_previous_installation() {
-    log_message "Memulai proses pembersihan instalasi sebelumnya..."
-
-    # Hentikan dan hapus kontainer Open WebUI
-    if sudo docker ps -a | grep -q "open-webui"; then
-        log_message "Menghentikan dan menghapus kontainer Open WebUI..."
-        sudo docker stop open-webui && sudo docker rm open-webui
-    fi
-
-    # Hapus volume Open WebUI
-    if sudo docker volume ls | grep -q "open-webui"; then
-        log_message "Menghapus volume Docker Open WebUI..."
-        sudo docker volume rm open-webui
-    fi
-
-    # Copot instalasi Ollama
-    if command -v ollama &> /dev/null; then
-        log_message "Mencopot instalasi Ollama..."
-        sudo ollama uninstall
-        # Hapus direktori Ollama jika masih ada
-        sudo rm -rf /usr/local/bin/ollama
-        sudo rm -rf /usr/share/ollama
-    fi
-
-    # Hapus file override systemd untuk Ollama
-    if [ -f "/etc/systemd/system/ollama.service.d/override.conf" ]; then
-        log_message "Menghapus file override Ollama systemd..."
-        sudo rm /etc/systemd/system/ollama.service.d/override.conf
-        sudo systemctl daemon-reload
-    fi
-
-    # Hapus sertifikat Let's Encrypt untuk domain yang dimasukkan (jika ada)
-    # Catatan: Ini akan dijalankan setelah domain diminta
-    if [ -n "$CUSTOM_DOMAIN" ]; then # $CUSTOM_DOMAIN mungkin belum diatur di sini jika cleanup dipanggil terlalu awal
-        if sudo certbot certificates | grep -q "$CUSTOM_DOMAIN"; then
-            log_message "Menghapus sertifikat Let's Encrypt untuk $CUSTOM_DOMAIN..."
-            sudo certbot delete --cert-name "$CUSTOM_DOMAIN"
-        fi
-    else
-        log_message "Lewati penghapusan sertifikat Let's Encrypt karena domain belum ditentukan."
-    fi
-
-
-    # Hapus konfigurasi Nginx untuk Open WebUI
-    NGINX_CONF_FILE="/etc/nginx/sites-available/openwebui.conf"
-    if [ -f "$NGINX_CONF_FILE" ]; then
-        log_message "Menghapus konfigurasi Nginx untuk Open WebUI..."
-        sudo rm -f /etc/nginx/sites-enabled/openwebui.conf
-        sudo rm -f "$NGINX_CONF_FILE"
-        sudo systemctl restart nginx 2>/dev/null || true # Restart Nginx, abaikan error jika Nginx belum terinstal
-    fi
-
-    # Copot instalasi Nginx
-    if command -v nginx &> /dev/null; then
-        log_message "Mencopot instalasi Nginx..."
-        sudo apt-get purge -y nginx nginx-common nginx-full
-        sudo apt-get autoremove -y
-    fi
-
-    # Reset UFW
-    if command -v ufw &> /dev/null; then
-        log_message "Mereset UFW ke pengaturan default..."
-        echo "y" | sudo ufw reset
-        sudo ufw disable # Pastikan dinonaktifkan setelah reset
-    fi
-
-    # Copot instalasi Certbot
-    if command -v certbot &> /dev/null; then
-        log_message "Mencopot instalasi Certbot..."
-        sudo apt-get purge -y certbot python3-certbot-nginx
-        sudo apt-get autoremove -y
-    fi
-
-    # Copot instalasi Docker
-    if command -v docker &> /dev/null; then
-        log_message "Mencopot instalasi Docker..."
-        sudo apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-        sudo rm -rf /var/lib/docker
-        sudo rm -rf /var/lib/containerd
-        sudo apt-get autoremove -y
-    fi
-
-    # Copot instalasi dnsutils
-    if command -v dig &> /dev/null; then
-        log_message "Mencopot instalasi dnsutils..."
-        sudo apt-get purge -y dnsutils
-        sudo apt-get autoremove -y
-    fi
-
-    log_message "Pembersihan instalasi sebelumnya selesai."
-    log_message "Disarankan untuk me-restart server setelah pembersihan menyeluruh jika ada masalah yang muncul."
-}
-
-# --- Mulai Skrip ---
-log_message "Skrip Instalasi Open WebUI, Ollama, Docker, Nginx, UFW, dan Let's Encrypt SSL"
-
-read -p "Apakah Anda ingin membersihkan instalasi sebelumnya sebelum melanjutkan? (y/N): " CLEANUP_CONFIRM
-if [[ "$CLEANUP_CONFIRM" =~ ^[Yy]$ ]]; then
-    # Jika pengguna memilih cleanup, minta domain terlebih dahulu agar bisa menghapus sertifikat
-    read -p "Masukkan domain yang ingin Anda gunakan (atau yang sudah ada sertifikatnya) untuk pembersihan: " CUSTOM_DOMAIN_FOR_CLEANUP
-    if [ -n "$CUSTOM_DOMAIN_FOR_CLEANUP" ]; then
-        CUSTOM_DOMAIN="$CUSTOM_DOMAIN_FOR_CLEANUP" # Set CUSTOM_DOMAIN agar cleanup_previous_installation bisa menghapus cert
-    fi
-    cleanup_previous_installation
-    log_message "Melanjutkan dengan instalasi baru setelah pembersihan."
-else
-    log_message "Melewatkan pembersihan instalasi sebelumnya. Melanjutkan dengan instalasi baru."
-fi
-
 # --- 1. Instalasi Ollama ---
 log_message "Memulai instalasi Ollama..."
 
@@ -146,7 +24,7 @@ fi
 # --- 2. Instalasi Docker ---
 log_message "Memulai instalasi Docker..."
 
-# Hapus versi Docker lama jika ada (ini juga akan dilakukan oleh cleanup, tapi jaga-jaga)
+# Hapus versi Docker lama jika ada
 for pkg in docker.io docker-doc docker-compose docker-ce docker-ce-cli containerd.io runc; do sudo apt-get remove $pkg; done
 
 # Perbarui indeks paket apt dan instal paket yang diperlukan
@@ -220,68 +98,15 @@ sudo systemctl restart ollama
 
 log_message "Konfigurasi Ollama untuk komunikasi Docker telah diterapkan dan layanan Ollama di-restart."
 
-# --- 5. Konfigurasi Domain Kustom untuk Open WebUI dengan Nginx dan Validasi DNS ---
+# --- 5. Konfigurasi Domain Kustom untuk Open WebUI dengan Nginx ---
 log_message "Memulai konfigurasi domain kustom untuk Open WebUI."
 
-# Gunakan CUSTOM_DOMAIN yang sudah diatur dari cleanup atau minta lagi
-if [ -z "$CUSTOM_DOMAIN" ]; then
-    read -p "Masukkan domain yang ingin Anda gunakan untuk Open WebUI (misalnya, webui.domainanda.com): " CUSTOM_DOMAIN
-fi
-
+read -p "Masukkan domain yang ingin Anda gunakan untuk Open WebUI (misalnya, webui.domainanda.com): " CUSTOM_DOMAIN
 
 if [ -z "$CUSTOM_DOMAIN" ]; then
     log_message "Domain tidak dimasukkan. Open WebUI akan tetap dapat diakses melalui http://localhost:8080."
 else
     log_message "Domain yang Anda masukkan: $CUSTOM_DOMAIN"
-
-    # Instal dnsutils untuk 'dig' jika belum ada
-    if ! command -v dig &> /dev/null; then
-        log_message "Paket 'dnsutils' (untuk perintah 'dig') tidak ditemukan. Menginstal..."
-        sudo apt update
-        sudo apt install dnsutils -y
-        if [ $? -ne 0 ]; then
-            log_message "Gagal menginstal 'dnsutils'. Harap periksa koneksi internet Anda."
-            exit 1
-        fi
-        log_message "'dnsutils' berhasil diinstal."
-    fi
-
-    # Dapatkan IP publik server ini
-    SERVER_PUBLIC_IP=$(get_public_ip)
-    if [ -z "$SERVER_PUBLIC_IP" ]; then
-        log_message "PERINGATAN: Tidak dapat menentukan IP publik server ini. Validasi domain mungkin kurang akurat."
-        log_message "Pastikan server Anda memiliki koneksi internet yang berfungsi."
-    else
-        log_message "IP Publik Server ini: $SERVER_PUBLIC_IP"
-    fi
-
-    # Lakukan resolusi DNS untuk domain yang dimasukkan
-    log_message "Memeriksa resolusi DNS untuk domain $CUSTOM_DOMAIN..."
-    RESOLVED_IP=$(dig +short "$CUSTOM_DOMAIN" A | head -n 1)
-
-    if [ -z "$RESOLVED_IP" ]; then
-        log_message "ERROR: Domain '$CUSTOM_DOMAIN' TIDAK BERHASIL RESOLVE ke alamat IP manapun."
-        log_message "Ini berarti DNS Anda belum dikonfigurasi dengan benar atau belum tersebar."
-        log_message "Mohon periksa Catatan A DNS Anda untuk '$CUSTOM_DOMAIN' dan pastikan mengarah ke IP publik server ini ($SERVER_PUBLIC_IP)."
-        log_message "Tanpa resolusi DNS yang benar, instalasi SSL Certbot akan GAGAL."
-        read -p "Apakah Anda ingin melanjutkan tanpa resolusi DNS yang benar? (y/N): " CONFIRM_CONTINUE_DNS
-        if [[ ! "$CONFIRM_CONTINUE_DNS" =~ ^[Yy]$ ]]; then
-            log_message "Membatalkan. Silakan perbaiki Catatan A DNS Anda untuk '$CUSTOM_DOMAIN' dan jalankan skrip lagi."
-            exit 1
-        fi
-    elif [ "$SERVER_PUBLIC_IP" != "$RESOLVED_IP" ]; then
-        log_message "PERINGATAN: Domain '$CUSTOM_DOMAIN' berhasil resolve ke IP '$RESOLVED_IP',"
-        log_message "tetapi IP ini TIDAK COCOK dengan IP publik server ini ($SERVER_PUBLIC_IP)."
-        log_message "Ini kemungkinan berarti DNS Anda belum sepenuhnya diperbarui atau mengarah ke server yang salah."
-        log_message "Instalasi SSL Certbot mungkin GAGAL jika domain tidak mengarah dengan benar ke server ini."
-        read -p "Apakah Anda ingin melanjutkan meskipun ada ketidakcocokan IP? (y/N): " CONFIRM_CONTINUE_IP
-        if [[ ! "$CONFIRM_CONTINUE_IP" =~ ^[Yy]$ ]]; then
-            log_message "Membatalkan. Silakan perbaiki Catatan A DNS Anda untuk '$CUSTOM_DOMAIN' agar mengarah ke '$SERVER_PUBLIC_IP' dan jalankan skrip lagi."
-            exit 1
-        fi
-    else
-        log_message "SUKSES: Domain '$CUSTOM_DOMAIN' resolve ke IP '$RESOLVED_IP', yang cocok dengan IP publik server ini."
-    fi
 
     # Instal Nginx jika belum terinstal
     if ! command -v nginx &> /dev/null; then
@@ -297,12 +122,49 @@ else
         log_message "Nginx sudah terinstal. Melanjutkan konfigurasi."
     fi
 
-    # Buat file konfigurasi Nginx baru (untuk HTTP awal agar Certbot bisa memvalidasi, atau langsung HTTPS jika cert sudah ada)
+    # Buat file konfigurasi Nginx baru (untuk HTTP awal agar Certbot bisa memvalidasi)
     NGINX_CONF_FILE="/etc/nginx/sites-available/openwebui.conf"
     log_message "Membuat file konfigurasi Nginx: $NGINX_CONF_FILE"
 
+    sudo bash -c "cat << EOF > $NGINX_CONF_FILE
+server {
+    listen 80;
+    server_name $CUSTOM_DOMAIN;
+
+    location / {
+        proxy_pass http://localhost:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF"
+
     # Hapus symlink lama jika ada
     sudo rm -f /etc/nginx/sites-enabled/openwebui.conf
+
+    # Aktifkan konfigurasi Nginx
+    log_message "Mengaktifkan konfigurasi Nginx untuk $CUSTOM_DOMAIN."
+    sudo ln -s $NGINX_CONF_FILE /etc/nginx/sites-enabled/
+
+    # Uji konfigurasi Nginx
+    log_message "Menguji konfigurasi Nginx..."
+    sudo nginx -t
+    if [ $? -ne 0 ]; then
+        log_message "Konfigurasi Nginx memiliki kesalahan. Harap periksa file $NGINX_CONF_FILE."
+        exit 1
+    fi
+
+    # Restart layanan Nginx
+    log_message "Memuat ulang dan me-restart layanan Nginx..."
+    sudo systemctl restart nginx
+    if [ $? -ne 0 ]; then
+        log_message "Gagal me-restart Nginx. Harap periksa status layanan Nginx."
+        exit 1
+    fi
+
+    log_message "Nginx berhasil dikonfigurasi sebagai reverse proxy HTTP untuk $CUSTOM_DOMAIN."
 
     # --- 6. Konfigurasi UFW (Uncomplicated Firewall) ---
     log_message "Memulai konfigurasi UFW (Uncomplicated Firewall)..."
@@ -363,94 +225,28 @@ else
     sudo apt update
     sudo apt install certbot python3-certbot-nginx -y
 
-    # Periksa apakah sertifikat untuk domain sudah ada
-    if sudo certbot certificates | grep -q "Cert Name: $CUSTOM_DOMAIN"; then
-        log_message "Sertifikat SSL untuk $CUSTOM_DOMAIN sudah ada. Melompati pendaftaran baru."
-        # Buat konfigurasi Nginx HTTPS jika sertifikat sudah ada
-        sudo bash -c "cat << EOF > $NGINX_CONF_FILE
-server {
-    listen 80;
-    listen 443 ssl;
-    server_name $CUSTOM_DOMAIN;
+    # Jalankan Certbot untuk mendapatkan dan menginstal sertifikat SSL
+    log_message "Menjalankan Certbot untuk mendapatkan sertifikat SSL untuk $CUSTOM_DOMAIN."
+    log_message "Ikuti petunjuk Certbot. Anda akan diminta untuk email dan persetujuan ToS."
+    sudo certbot --nginx -d "$CUSTOM_DOMAIN" --agree-tos --redirect --hsts --staple-ocsp --email YOUR_EMAIL@example.com
 
-    ssl_certificate /etc/letsencrypt/live/$CUSTOM_DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$CUSTOM_DOMAIN/privkey.pem;
-    include /etc/letsencrypt/options-ssl-nginx.conf;
-    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
-
-    location / {
-        proxy_pass http://localhost:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-EOF"
-    else
-        log_message "Sertifikat SSL untuk $CUSTOM_DOMAIN belum ada. Mendaftarkan yang baru."
-        # Buat konfigurasi Nginx HTTP awal agar Certbot bisa memvalidasi
-        sudo bash -c "cat << EOF > $NGINX_CONF_FILE
-server {
-    listen 80;
-    server_name $CUSTOM_DOMAIN;
-
-    location / {
-        proxy_pass http://localhost:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-EOF"
-        # Aktifkan konfigurasi Nginx awal
-        sudo ln -s $NGINX_CONF_FILE /etc/nginx/sites-enabled/
-        sudo systemctl restart nginx # Restart Nginx untuk memuat konfigurasi HTTP
-
-        log_message "Menjalankan Certbot untuk mendapatkan sertifikat SSL untuk $CUSTOM_DOMAIN."
-        log_message "Ikuti petunjuk Certbot. Anda akan diminta untuk email dan persetujuan ToS."
-        # Penting: Ganti 'admin@"$CUSTOM_DOMAIN"' dengan alamat email Anda yang sebenarnya!
-        sudo certbot --nginx -d "$CUSTOM_DOMAIN" --agree-tos --redirect --hsts --staple-ocsp --email admin@"$CUSTOM_DOMAIN"
-
-        if [ $? -ne 0 ]; then
-            log_message "Gagal mendapatkan atau menginstal sertifikat SSL untuk $CUSTOM_DOMAIN."
-            log_message "Alasan paling umum adalah domain Anda TIDAK mengarah ke IP publik server ini."
-            log_message "Anda masih dapat mengakses Open WebUI melalui http://localhost:8080."
-            # Hapus konfigurasi Nginx jika Certbot gagal agar tidak ada file sampah
-            sudo rm -f /etc/nginx/sites-enabled/openwebui.conf
-            sudo rm -f "$NGINX_CONF_FILE"
-            sudo systemctl restart nginx 2>/dev/null || true
-            exit 1
-        fi
-    fi
-
-    # Pastikan konfigurasi Nginx yang terbaru (dengan SSL jika baru didaftarkan atau sudah ada) diaktifkan
-    sudo rm -f /etc/nginx/sites-enabled/openwebui.conf # Hapus symlink lama
-    sudo ln -s $NGINX_CONF_FILE /etc/nginx/sites-enabled/ # Buat symlink baru
-    log_message "Menguji konfigurasi Nginx akhir..."
-    sudo nginx -t
-    if [ $? -ne 0 ]; then
-        log_message "Konfigurasi Nginx akhir memiliki kesalahan. Harap periksa file $NGINX_CONF_FILE."
-        exit 1
-    fi
-    log_message "Memuat ulang dan me-restart layanan Nginx..."
-    sudo systemctl restart nginx
-    if [ $? -ne 0 ]; then
-        log_message "Gagal me-restart Nginx setelah konfigurasi SSL. Harap periksa status layanan Nginx."
-        exit 1
-    fi
-
-    log_message "Sertifikat SSL terpasang dan Nginx dikonfigurasi untuk $CUSTOM_DOMAIN."
-    log_message "Anda sekarang dapat mengakses Open WebUI melalui: https://$CUSTOM_DOMAIN"
-
-    # Tes perpanjangan otomatis sertifikat
-    log_message "Menguji perpanjangan otomatis sertifikat Certbot..."
-    sudo certbot renew --dry-run
     if [ $? -eq 0 ]; then
-        log_message "Perpanjangan otomatis Certbot berhasil diuji."
+        log_message "Sertifikat SSL berhasil diinstal untuk $CUSTOM_DOMAIN!"
+        log_message "Konfigurasi Nginx telah diperbarui untuk menggunakan HTTPS dan mengalihkan HTTP ke HTTPS."
+        log_message "Anda sekarang dapat mengakses Open WebUI melalui: https://$CUSTOM_DOMAIN"
+
+        # Tes perpanjangan otomatis sertifikat
+        log_message "Menguji perpanjangan otomatis sertifikat Certbot..."
+        sudo certbot renew --dry-run
+        if [ $? -eq 0 ]; then
+            log_message "Perpanjangan otomatis Certbot berhasil diuji."
+        else
+            log_message "Pengujian perpanjangan otomatis Certbot gagal. Periksa log Certbot."
+        fi
     else
-        log_message "Pengujian perpanjangan otomatis Certbot gagal. Periksa log Certbot."
+        log_message "Gagal mendapatkan atau menginstal sertifikat SSL untuk $CUSTOM_DOMAIN."
+        log_message "Pastikan domain Anda sudah mengarah ke IP server ini dan port 80/443 tidak terhalang."
+        log_message "Anda masih dapat mengakses Open WebUI melalui http://localhost:8080."
     fi
 
 fi # End of if [ -z "$CUSTOM_DOMAIN" ]
