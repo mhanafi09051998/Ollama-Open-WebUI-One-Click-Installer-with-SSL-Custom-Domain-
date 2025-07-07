@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # Skrip Instalasi Otomatis untuk Ollama, Docker, dan Open WebUI
-# Dirancang untuk distribusi Linux berbasis Debian/Ubuntu.
+# dengan konfigurasi domain otomatis via Nginx (Reverse Proxy).
 # VERSI INI DIRANCANG UNTUK DIJALANKAN DENGAN 'sudo'
 # ==============================================================================
 
@@ -18,6 +18,7 @@ set -o pipefail
 BLUE='\033[0;34m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m'
 
 log_info() {
@@ -27,139 +28,144 @@ log_info() {
 }
 
 log_success() {
-    echo -e "${GREEN}$1${NC}"
+    echo -e "${GREEN}✅ $1${NC}"
 }
 
 log_warn() {
-    echo -e "${YELLOW}$1${NC}"
+    echo -e "${YELLOW}⚠️ $1${NC}"
 }
 
-# Variabel ORIGINAL_USER akan menampung nama pengguna yang menjalankan sudo.
-# Ini penting agar pengguna yang benar ditambahkan ke grup docker, bukan 'root'.
+log_error() {
+    echo -e "${RED}❌ $1${NC}"
+}
+
+# --- 1. Input dari Pengguna untuk Konfigurasi Domain ---
+log_info "Memasukkan Konfigurasi Domain"
+log_warn "PASTIKAN DNS record (A/AAAA) untuk domain Anda sudah diarahkan ke IP server ini."
+echo ""
+
+while [[ -z "$USER_DOMAIN" ]]; do
+    read -p "Masukkan nama domain Anda (e.g., chat.domain.com): " USER_DOMAIN
+    if [[ -z "$USER_DOMAIN" ]]; then
+        log_error "Nama domain tidak boleh kosong."
+    fi
+done
+
+log_success "Konfigurasi diterima: Domain ($USER_DOMAIN)"
 ORIGINAL_USER="${SUDO_USER:-$USER}"
 
 # ==============================================================================
-# --- 1. Instalasi Ollama ---
+# --- 2. Instalasi Docker dan Dependensi ---
+# ==============================================================================
+log_info "Memulai instalasi dependensi dan Docker..."
+apt-get update
+apt-get install -y ca-certificates curl gnupg
+
+# Menyiapkan repositori Docker
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Update apt SETELAH menambahkan repo Docker
+log_info "Memperbarui daftar paket setelah menambahkan repositori Docker..."
+apt-get update
+
+# Instal paket Docker dan Nginx
+log_info "Menginstal paket-paket yang dibutuhkan (Docker, Nginx)..."
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin nginx
+log_success "Dependensi berhasil diinstal."
+
+
+# ==============================================================================
+# --- 3. Instalasi & Konfigurasi Ollama ---
 # ==============================================================================
 log_info "Memulai instalasi Ollama..."
-
 if command -v ollama &> /dev/null; then
-    log_success "Ollama sudah terinstal. Melewati instalasi."
+    log_success "Ollama sudah terinstal."
 else
     curl -fsSL https://ollama.com/install.sh | sh
-    if command -v ollama &> /dev/null; then
-        log_success "Ollama berhasil diinstal."
-    else
-        log_warn "Ollama gagal diinstal. Harap periksa log di atas."
-        exit 1
-    fi
 fi
 
-# ==============================================================================
-# --- 2. Instalasi Docker ---
-# ==============================================================================
-log_info "Memulai instalasi Docker..."
-
-if command -v docker &> /dev/null; then
-    log_success "Docker sudah terinstal. Melewati instalasi."
-else
-    log_info "Menghapus instalasi Docker lama (jika ada)..."
-    for pkg in docker.io docker-doc docker-compose docker-ce docker-ce-cli containerd.io runc; do
-        apt-get remove -y $pkg >/dev/null 2>&1 || true
-    done
-
-    log_info "Menginstal dependensi dan kunci GPG Docker..."
-    apt-get update
-    apt-get install -y ca-certificates curl gnupg
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    chmod a+r /etc/apt/keyrings/docker.gpg
-
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-      tee /etc/apt/sources.list.d/docker.list > /dev/null
-    apt-get update
-
-    log_info "Menginstal Docker Engine..."
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    log_success "Docker Engine berhasil diinstal."
-fi
-
-if ! getent group docker | grep -q "\b$ORIGINAL_USER\b"; then
-    log_info "Menambahkan pengguna '$ORIGINAL_USER' ke grup Docker..."
-    usermod -aG docker "$ORIGINAL_USER"
-    log_warn "PENTING: Pengguna '$ORIGINAL_USER' harus LOGOUT dan LOGIN kembali agar perubahan grup Docker berlaku!"
-fi
-
-log_info "Memverifikasi fungsionalitas Docker..."
-if docker run hello-world >/dev/null; then
-    log_success "Docker berhasil diinstal dan berfungsi dengan benar."
-else
-    log_warn "Docker gagal berfungsi. Harap periksa log di atas."
-    exit 1
-fi
-
-# ==============================================================================
-# --- 3. Konfigurasi Ollama untuk Integrasi Docker ---
-# ==============================================================================
 log_info "Mengkonfigurasi Ollama untuk komunikasi dengan Docker..."
-
 mkdir -p /etc/systemd/system/ollama.service.d/
 bash -c 'cat << EOF > /etc/systemd/system/ollama.service.d/override.conf
 [Service]
 Environment="OLLAMA_HOST=0.0.0.0"
 EOF'
-
-log_info "Menerapkan konfigurasi baru dan me-restart layanan Ollama..."
 systemctl daemon-reload
 systemctl restart ollama
-log_success "Konfigurasi Ollama untuk komunikasi Docker telah diterapkan."
+log_success "Ollama berhasil dikonfigurasi."
 
 # ==============================================================================
-# --- 4. Pra-instalasi Model Ollama ---
+# --- 4. Konfigurasi Docker & Pra-instalasi Model ---
 # ==============================================================================
+log_info "Mengonfigurasi grup Docker..."
+if ! getent group docker | grep -q "\b$ORIGINAL_USER\b"; then
+    usermod -aG docker "$ORIGINAL_USER"
+    log_warn "PENTING: Pengguna '$ORIGINAL_USER' harus LOGOUT dan LOGIN kembali agar perubahan grup Docker berlaku!"
+fi
+
 if [[ -n "$OLLAMA_PREPULL_MODEL" ]]; then
-    log_info "Memulai pra-unduh model: $OLLAMA_PREPULL_MODEL"
-    log_info "Ini mungkin memakan waktu beberapa menit tergantung koneksi internet Anda..."
+    log_info "Memulai pra-unduh model: $OLLAMA_PREPULL_MODEL (mungkin butuh waktu lama)..."
     ollama pull "$OLLAMA_PREPULL_MODEL"
     log_success "Model '$OLLAMA_PREPULL_MODEL' berhasil diunduh."
-else
-    log_info "Variabel OLLAMA_PREPULL_MODEL kosong, melewati pra-unduh model."
 fi
 
 # ==============================================================================
 # --- 5. Instalasi Open WebUI ---
 # ==============================================================================
 log_info "Memulai instalasi Open WebUI..."
-
 if [ "$(docker ps -a -q -f name=open-webui)" ]; then
     log_info "Kontainer Open WebUI lama ditemukan. Menghentikan dan menghapusnya..."
     docker stop open-webui
     docker rm open-webui
 fi
 
-log_info "Menjalankan kontainer Open WebUI..."
-docker run -d \
-    -p ${WEBUI_PORT}:8080 \
-    --add-host=host.docker.internal:host-gateway \
-    -v open-webui:/app/backend/data \
-    --name open-webui \
-    --restart always \
-    "ghcr.io/open-webui/open-webui:${WEBUI_IMAGE_TAG}"
+docker run -d -p 127.0.0.1:${WEBUI_PORT}:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui --restart always "ghcr.io/open-webui/open-webui:${WEBUI_IMAGE_TAG}"
+log_success "Kontainer Open WebUI berhasil dijalankan."
 
-log_info "Memverifikasi status kontainer Open WebUI..."
-sleep 5
+# ==============================================================================
+# --- 6. Konfigurasi Nginx Reverse Proxy ---
+# ==============================================================================
+log_info "Mengonfigurasi Nginx sebagai Reverse Proxy untuk domain $USER_DOMAIN..."
 
-if docker ps --filter "name=open-webui" --filter "status=running" -q; then
-    log_success "✅ Instalasi Selesai!"
-    log_success "Open WebUI berhasil diinstal dan berjalan."
-    echo -e "\n${GREEN}Anda dapat mengakses Open WebUI di browser Anda melalui:${NC}"
-    echo -e "${YELLOW}http://localhost:${WEBUI_PORT}${NC}"
-    echo ""
-    log_warn "INGAT: Pengguna '$ORIGINAL_USER' harus LOGOUT dan LOGIN kembali agar perubahan grup Docker berlaku."
-else
-    log_warn "🔴 Open WebUI gagal berjalan. Harap periksa log kontainer."
-    log_warn "Jalankan perintah berikut untuk melihat log: docker logs open-webui"
-    exit 1
-fi
+# Membuat file konfigurasi Nginx
+cat << EOF > /etc/nginx/sites-available/$USER_DOMAIN
+server {
+    listen 80;
+    server_name $USER_DOMAIN;
+
+    location / {
+        proxy_pass http://127.0.0.1:${WEBUI_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+
+# Mengaktifkan site
+ln -s -f /etc/nginx/sites-available/$USER_DOMAIN /etc/nginx/sites-enabled/
+
+# Hapus konfigurasi default jika ada untuk menghindari konflik
+rm -f /etc/nginx/sites-enabled/default
+
+log_info "Testing dan memuat ulang konfigurasi Nginx..."
+nginx -t
+systemctl reload nginx
+log_success "Nginx berhasil dikonfigurasi untuk port 80 (HTTP)."
+
+
+# ==============================================================================
+# --- Selesai ---
+# ==============================================================================
+log_success "Instalasi Selesai!"
+echo -e "\n${GREEN}Anda sekarang dapat mengakses Open WebUI melalui domain berikut:${NC}"
+echo -e "${YELLOW}http://$USER_DOMAIN${NC}"
+echo ""
+log_warn "INGAT: Pengguna '$ORIGINAL_USER' mungkin perlu LOGOUT dan LOGIN kembali agar perubahan grup Docker berlaku."
