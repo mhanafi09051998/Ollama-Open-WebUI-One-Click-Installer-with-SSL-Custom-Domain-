@@ -25,7 +25,7 @@ SPINNER_CHARS="/-\|"
 
 # Penghitung Langkah
 STEP=0
-TOTAL_STEPS=7 # Total langkah utama
+TOTAL_STEPS=8 # Total langkah utama
 
 # --- Fungsi Bantuan Tampilan ---
 
@@ -137,7 +137,7 @@ fi
 
 # --- 1. Persiapan & Validasi DNS ---
 print_step_header "Persiapan Sistem & Validasi DNS"
-wait_for_apt_lock # <-- INI ADALAH PERBAIKANNYA
+wait_for_apt_lock
 run_step "apt-get update -y" "Memperbarui daftar paket sistem"
 run_step "apt-get install -y curl gnupg ca-certificates dnsutils" "Menginstal dependensi dasar"
 
@@ -202,7 +202,12 @@ run_step "sleep 5 && docker ps -a | grep -q 'open-webui'" "Memverifikasi kontain
 print_step_header "Instalasi Sertifikat SSL (Let's Encrypt)"
 run_step "apt-get install -y certbot python3-certbot-nginx" "Menginstal Certbot"
 run_step "certbot --nginx -d \"$DOMAIN_NAME\" --non-interactive --agree-tos -m \"$EMAIL\" --redirect" "Memperoleh sertifikat SSL"
-run_step "systemctl list-timers | grep -q 'certbot.timer'" "Memverifikasi pembaruan SSL otomatis"
+
+# --- 8. Memverifikasi Proses Pembaruan Sertifikat ---
+print_step_header "Memverifikasi Proses Pembaruan Sertifikat"
+run_step "certbot renew" "Mencoba pembaruan nyata (bukan simulasi)"
+run_step "systemctl list-timers | grep -q 'certbot.timer'" "Memverifikasi timer pembaruan aktif"
+
 
 # --- Selesai ---
 echo ""
@@ -220,6 +225,9 @@ if [ -n "$SUDO_USER" ]; then
     echo "  ${YELLOW}PENTING:${NC} Pengguna '${SUDO_USER}' telah ditambahkan ke grup Docker."
     echo "  Harap logout dan login kembali agar dapat menjalankan 'docker' tanpa sudo."
 fi
+echo ""
+echo "  Sertifikat SSL Anda akan diperbarui secara otomatis. Konfigurasi pembaruan"
+echo "  telah berhasil diverifikasi."
 echo ""
 echo "  Log instalasi lengkap tersimpan di: ${BLUE}$LOG_FILE${NC}"
 echo ""
