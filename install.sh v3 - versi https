@@ -57,12 +57,14 @@ pre_flight_checks() {
     log_info "Memverifikasi DNS untuk $USER_DOMAIN..."
     apt-get update >/dev/null && apt-get install -y dnsutils >/dev/null
     
+    # Mengambil IP publik server secara eksplisit melalui IPv4
     SERVER_IP=$(curl -4 -s https://api.ipify.org)
     if [[ -z "$SERVER_IP" ]]; then
         log_error "Tidak dapat mengambil alamat IP publik (IPv4) server."
         exit 1
     fi
     
+    # Mengambil record A (IPv4) dari domain
     DOMAIN_IP=$(dig +short "$USER_DOMAIN" A | head -n 1)
     
     if [[ -z "$DOMAIN_IP" ]]; then
