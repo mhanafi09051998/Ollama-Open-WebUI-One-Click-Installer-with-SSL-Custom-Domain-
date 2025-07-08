@@ -6,7 +6,7 @@
 # Fitur Utama:
 # - Pemeriksaan DNS Pra-instalasi: Memastikan domain menunjuk ke IP server (IPv4).
 # - Manajemen Firewall Otomatis: Membuka port 80/443 pada UFW jika aktif.
-# - Idempotent: Aman untuk dijalankan beberapa kali.
+# - Idempotent & Tangguh: Aman dijalankan beberapa kali dan memiliki mekanisme coba-lagi.
 # - Konfigurasi Penuh: Dari instalasi dasar hingga domain HTTPS yang fungsional.
 # - Interaktif & Opsional: Meminta input pengguna dan membuat SSL opsional.
 #
@@ -19,7 +19,7 @@
 # --- Variabel Konfigurasi ---
 WEBUI_PORT=8080
 WEBUI_IMAGE_TAG="main"
-OLLAMA_PREPULL_MODEL="deepseek-r1:1.5b"
+OLLAMA_PREPULL_MODEL="deepseek-coder:1.3b-instruct" # Model yang lebih baik untuk coding
 
 # --- Fungsi Bantuan dan Warna ---
 set -e
@@ -55,7 +55,9 @@ pre_flight_checks() {
 
     # 1b. Pemeriksaan DNS (Secara Eksplisit Menggunakan IPv4)
     log_info "Memverifikasi DNS untuk $USER_DOMAIN..."
-    apt-get update >/dev/null && apt-get install -y dnsutils >/dev/null
+    if ! command -v dnsutils &> /dev/null; then
+        apt-get update >/dev/null && apt-get install -y dnsutils >/dev/null
+    fi
     
     SERVER_IP=$(curl -4 -s https://api.ipify.org)
     if [[ -z "$SERVER_IP" ]]; then
@@ -103,6 +105,7 @@ ORIGINAL_USER="${SUDO_USER:-$USER}"
 
 # --- 3. Instalasi Docker dan Dependensi ---
 log_info "Memulai instalasi Docker..."
+apt-get update
 apt-get install -y ca-certificates curl gnupg
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -155,14 +158,21 @@ if [[ "$ACTIVATE_SSL" =~ ^[Yy]$ ]]; then
     log_info "Mengaktifkan SSL... Menginstal Nginx dan Certbot."
     apt-get install -y nginx certbot python3-certbot-nginx
     
-    # Konfigurasi Nginx untuk tantangan Certbot
+    # Konfigurasi Nginx untuk tantangan Certbot (lebih ketat)
     cat << EOF > $NGINX_CONFIG_FILE
 server {
     listen 80;
     server_name $USER_DOMAIN;
     root /var/www/html;
+    
     location ~ /.well-known/acme-challenge/ {
         allow all;
+    }
+
+    # <<< PERBAIKAN >>>
+    # Tolak semua request lain selama proses validasi
+    location / {
+        return 404;
     }
 }
 EOF
@@ -170,8 +180,31 @@ EOF
     rm -f /etc/nginx/sites-enabled/default
     systemctl restart nginx
 
-    log_info "Meminta sertifikat SSL dengan Certbot..."
-    certbot --nginx -d $USER_DOMAIN --non-interactive --agree-tos -m "$USER_EMAIL" --redirect
+    # <<< PERBAIKAN DIMULAI: Mekanisme Coba-Lagi untuk Certbot >>>
+    log_info "Meminta sertifikat SSL dengan Certbot (dengan mekanisme coba-lagi)..."
+    MAX_RETRIES=3
+    RETRY_DELAY=30 # dalam detik
+    CERT_SUCCESS=false
+
+    for i in $(seq 1 $MAX_RETRIES); do
+        if certbot --nginx -d "$USER_DOMAIN" --non-interactive --agree-tos -m "$USER_EMAIL" --redirect; then
+            log_success "Sertifikat SSL berhasil didapatkan pada percobaan ke-$i."
+            CERT_SUCCESS=true
+            break
+        else
+            log_warn "Percobaan ke-$i untuk mendapatkan sertifikat SSL gagal."
+            if [ "$i" -lt "$MAX_RETRIES" ]; then
+                log_warn "Akan mencoba lagi dalam $RETRY_DELAY detik..."
+                sleep $RETRY_DELAY
+            fi
+        fi
+    done
+
+    if [ "$CERT_SUCCESS" = false ]; then
+        log_error "Tidak dapat memperoleh sertifikat SSL setelah $MAX_RETRIES percobaan. Silakan periksa log di /var/log/letsencrypt/."
+        exit 1
+    fi
+    # <<< PERBAIKAN SELESAI >>>
     
     # Timpa konfigurasi dengan setting reverse proxy setelah SSL didapat
     cat << EOF > $NGINX_CONFIG_FILE
@@ -229,14 +262,18 @@ EOF
 fi
 
 log_info "Menyelesaikan Konfigurasi Nginx..."
-nginx -t && systemctl restart nginx
+if ! nginx -t; then
+    log_error "Tes konfigurasi Nginx gagal. Silakan periksa file $NGINX_CONFIG_FILE."
+    exit 1
+fi
+systemctl restart nginx
 log_success "Nginx berhasil dikonfigurasi."
 
 # --- Selesai ---
 log_info "INSTALASI SELESAI"
 echo -e "\n${GREEN}Semua komponen telah berhasil diinstal dan dikonfigurasi.${NC}"
 echo -e "Anda sekarang dapat mengakses Open WebUI melalui URL berikut:"
-echo -e "\n    ${YELLOW}${FINAL_URL}${NC}\n"
+echo -e "\n   ${YELLOW}${FINAL_URL}${NC}\n"
 if ! getent group docker | grep -q "\b$ORIGINAL_USER\b"; then
     log_warn "Aksi Diperlukan: Pengguna '$ORIGINAL_USER' perlu LOGOUT dan LOGIN kembali untuk menggunakan 'docker' tanpa 'sudo'."
 fi
