@@ -19,7 +19,7 @@
 # --- Variabel Konfigurasi ---
 WEBUI_PORT=8080
 WEBUI_IMAGE_TAG="main"
-OLLAMA_PREPULL_MODEL="deepseek-coder:1.3b-instruct" # Model yang lebih baik untuk coding
+OLLAMA_PREPULL_MODEL="deepseek-r1:1.5b" # <<< MODEL DIUBAH SESUAI PERMINTAAN
 
 # --- Fungsi Bantuan dan Warna ---
 set -e
@@ -169,8 +169,6 @@ server {
         allow all;
     }
 
-    # <<< PERBAIKAN >>>
-    # Tolak semua request lain selama proses validasi
     location / {
         return 404;
     }
@@ -180,7 +178,6 @@ EOF
     rm -f /etc/nginx/sites-enabled/default
     systemctl restart nginx
 
-    # <<< PERBAIKAN DIMULAI: Mekanisme Coba-Lagi untuk Certbot >>>
     log_info "Meminta sertifikat SSL dengan Certbot (dengan mekanisme coba-lagi)..."
     MAX_RETRIES=3
     RETRY_DELAY=30 # dalam detik
@@ -204,7 +201,6 @@ EOF
         log_error "Tidak dapat memperoleh sertifikat SSL setelah $MAX_RETRIES percobaan. Silakan periksa log di /var/log/letsencrypt/."
         exit 1
     fi
-    # <<< PERBAIKAN SELESAI >>>
     
     # Timpa konfigurasi dengan setting reverse proxy setelah SSL didapat
     cat << EOF > $NGINX_CONFIG_FILE
